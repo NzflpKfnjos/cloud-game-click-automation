@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         云游戏点击脚本助手
 // @namespace    local.cloud-game-clicker
-// @version      1.1.0
+// @version      1.2.0
 // @description  记录并按顺序重放云游戏画布上的点击位置
 // @match        https://start.qq.com/game/arm-game/*
 // @run-at       document-idle
@@ -43,7 +43,7 @@
       </div>
       <div class="cgca-fields">
         <label>间隔(ms)<input data-role="interval" type="number" min="30" step="10" value="500"></label>
-        <label>循环(0=无限)<input data-role="loops" type="number" min="0" step="1" value="1"></label>
+        <label>循环(0=无限)<input data-role="loops" type="number" min="0" step="1" value="0"></label>
       </div>
       <div class="cgca-row">
         <button data-action="clear">清空坐标</button>
@@ -73,6 +73,13 @@
     #cgca-panel .cgca-row { display:flex; gap:6px; margin-top:8px; }
     #cgca-panel .cgca-row button { flex:1; }
     #cgca-panel .cgca-status { min-height:34px; padding:6px 7px; color:#bed0e4; background:#101721; border-radius:4px; }
+    #cgca-panel.cgca-running { border-color:#ffbd45; box-shadow:0 0 0 2px #ffbd4533, 0 8px 30px #0008; }
+    #cgca-panel.cgca-running .cgca-head { background:linear-gradient(90deg,#7a4a12,#a35d0f); }
+    #cgca-panel.cgca-running .cgca-status { color:#fff4d6; background:#4b2d08; border:1px solid #d38a20; font-weight:600; animation:cgca-pulse 1.4s ease-in-out infinite; }
+    #cgca-panel.cgca-running .cgca-status::before { content:'●'; display:inline-block; margin-right:6px; color:#ffd166; animation:cgca-blink .8s step-end infinite; }
+    #cgca-panel.cgca-running [data-action="run"] { background:#9a681c; border-color:#ffc45c; }
+    @keyframes cgca-pulse { 50% { box-shadow:inset 0 0 0 1px #ffc45c66; } }
+    @keyframes cgca-blink { 50% { opacity:.25; } }
     #cgca-panel .cgca-fields { display:flex; gap:7px; margin-top:8px; }
     #cgca-panel label { flex:1; color:#aabbd0; font-size:12px; }
     #cgca-panel input { display:block; width:100%; margin-top:3px; padding:5px 6px; color:#edf3fa; background:#0f1721; border:1px solid #53657a; border-radius:4px; }
@@ -89,6 +96,9 @@
   const listEl = panel.querySelector('[data-role="list"]');
   const intervalEl = panel.querySelector('[data-role="interval"]');
   const loopsEl = panel.querySelector('[data-role="loops"]');
+  const recordButton = panel.querySelector('[data-action="record"]');
+  const runButton = panel.querySelector('[data-action="run"]');
+  const stopButton = panel.querySelector('[data-action="stop"]');
 
   function loadPoints() {
     try {
@@ -105,6 +115,20 @@
 
   function setStatus(text) { statusEl.textContent = text; }
 
+  function updateRunningUI() {
+    panel.classList.toggle('cgca-running', state.running);
+    recordButton.disabled = state.running;
+    runButton.disabled = state.running;
+    stopButton.disabled = !state.running;
+    intervalEl.disabled = state.running;
+    loopsEl.disabled = state.running;
+    runButton.textContent = state.running ? '运行中…' : '运行';
+    if (state.running && state.recording) {
+      state.recording = false;
+      recordButton.textContent = '记录';
+    }
+  }
+
   function renderList() {
     listEl.replaceChildren();
     state.points.forEach((point, index) => {
@@ -120,21 +144,30 @@
     });
   }
 
-  function getSurface() {
+  function getSurface(referencePoint = null) {
     const candidates = [...document.querySelectorAll('canvas, video')]
-      .filter((node) => { const r = node.getBoundingClientRect(); return r.width > 100 && r.height > 100; });
+      .map((node) => ({ node, rect: node.getBoundingClientRect(), style: getComputedStyle(node) }))
+      .filter(({ rect, style }) => rect.width > 100 && rect.height > 100
+        && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0);
+    if (!candidates.length) return null;
+    const referenceRatio = Number(referencePoint?.surfaceRatio);
     return candidates.sort((a, b) => {
-      const ar = a.getBoundingClientRect(); const br = b.getBoundingClientRect();
-      return (br.width * br.height) - (ar.width * ar.height);
-    })[0] || null;
+      const areaScore = (item) => item.rect.width * item.rect.height;
+      const matchScore = (item) => {
+        if (!Number.isFinite(referenceRatio)) return 0;
+        return Math.abs(item.rect.width / item.rect.height - referenceRatio);
+      };
+      return (matchScore(a) - matchScore(b)) || (areaScore(b) - areaScore(a));
+    })[0].node;
   }
 
   function pointFromEvent(event) {
-    const surface = getSurface();
+    const eventSurface = event.target?.closest?.('canvas, video');
+    const surface = eventSurface || getSurface();
     if (surface) {
       const rect = surface.getBoundingClientRect();
       if (event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom) {
-        return { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height, global: false };
+        return { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height, global: false, surfaceRatio: rect.width / rect.height };
       }
     }
     return { x: event.clientX / innerWidth, y: event.clientY / innerHeight, global: true };
@@ -142,10 +175,13 @@
 
   function eventPosition(point) {
     if (point.global) return { x: point.x * innerWidth, y: point.y * innerHeight };
-    const surface = getSurface();
+    const surface = getSurface(point);
     if (!surface) return { x: point.x * innerWidth, y: point.y * innerHeight };
     const rect = surface.getBoundingClientRect();
-    return { x: rect.left + point.x * rect.width, y: rect.top + point.y * rect.height };
+    return {
+      x: Math.min(rect.right - 1, Math.max(rect.left + 1, rect.left + point.x * rect.width)),
+      y: Math.min(rect.bottom - 1, Math.max(rect.top + 1, rect.top + point.y * rect.height)),
+    };
   }
 
   function emitClick(point) {
@@ -158,7 +194,16 @@
     }
   }
 
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  function waitWhileRunning(ms) {
+    return new Promise((resolve) => {
+      const started = performance.now();
+      const tick = () => {
+        if (state.stopRequested || performance.now() - started >= ms) resolve();
+        else setTimeout(tick, Math.min(50, ms));
+      };
+      tick();
+    });
+  }
 
   async function run() {
     if (state.running || !state.points.length) {
@@ -169,25 +214,35 @@
     state.stopRequested = false;
     state.loop = Math.max(0, Number.parseInt(loopsEl.value, 10) || 0);
     const interval = Math.max(30, Number.parseInt(intervalEl.value, 10) || 500);
+    const points = state.points.map((point) => ({ ...point }));
     let completed = 0;
-    setStatus('运行中，可按“停止”或 Esc 中止。');
-    while (!state.stopRequested && (state.loop === 0 || completed < state.loop)) {
-      for (const point of state.points) {
-        if (state.stopRequested) break;
-        emitClick(point);
-        await wait(interval);
+    updateRunningUI();
+    setStatus(state.loop === 0 ? '运行中 · 无限循环 · 准备开始' : `运行中 · 第 1/${state.loop} 轮`);
+    try {
+      while (!state.stopRequested && (state.loop === 0 || completed < state.loop)) {
+        for (let index = 0; index < points.length; index += 1) {
+          if (state.stopRequested) break;
+          emitClick(points[index]);
+          setStatus(state.loop === 0
+            ? `运行中 · 第 ${completed + 1} 轮 · 坐标 ${index + 1}/${points.length}`
+            : `运行中 · 第 ${completed + 1}/${state.loop} 轮 · 坐标 ${index + 1}/${points.length}`);
+          if (index < points.length - 1) await waitWhileRunning(interval);
+        }
+        completed += 1;
       }
-      completed += 1;
-      if (state.loop !== 0) setStatus(`运行中：第 ${completed}/${state.loop} 轮`);
+    } finally {
+      const wasStopped = state.stopRequested;
+      state.running = false;
+      state.stopRequested = false;
+      updateRunningUI();
+      setStatus(wasStopped ? `已停止 · 已完成 ${completed} 轮` : `运行完成 · 共 ${completed} 轮`);
     }
-    state.running = false;
-    state.stopRequested = false;
-    setStatus('已停止。');
   }
 
   function stop() {
+    if (!state.running) return;
     state.stopRequested = true;
-    if (state.running) setStatus('正在停止…');
+    setStatus('正在停止…');
   }
 
   document.addEventListener('pointerdown', (event) => {
@@ -203,7 +258,7 @@
     if (!action) return;
     if (action === 'record') {
       state.recording = !state.recording;
-      event.target.textContent = state.recording ? '结束记录' : '记录';
+      recordButton.textContent = state.recording ? '结束记录' : '记录';
       setStatus(state.recording ? '记录中：点击游戏画面添加坐标。' : '记录已结束。');
     } else if (action === 'run') run();
     else if (action === 'stop') stop();
@@ -243,5 +298,6 @@
   });
   panel.querySelector('.cgca-head').addEventListener('pointerup', () => { drag = null; });
 
+  updateRunningUI();
   renderList();
 })();

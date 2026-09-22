@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>金铲铲自动对战</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: #0d1520;
+        --surface: #152232;
+        --surface-raised: #1b2b3f;
+        --border: #31475e;
+        --text: #eaf2fb;
+        --muted: #91a6bc;
+        --accent: #54b6ff;
+        --accent-strong: #258bd3;
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body { min-height: 100%; }
+
+      body {
+        margin: 0;
+        background: var(--page);
+        color: var(--text);
+        font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .app {
+        display: flex;
+        min-height: 100vh;
+        flex-direction: column;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 18px 24px;
+        border-bottom: 1px solid var(--border);
+        background: #111c2a;
+      }
+
+      .title-group { min-width: 0; }
+
+      h1 {
+        margin: 0;
+        font-size: 20px;
+        line-height: 1.2;
+        letter-spacing: 0;
+      }
+
+      .subtitle {
+        margin: 5px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      button {
+        min-height: 34px;
+        padding: 7px 12px;
+        border: 1px solid #49647e;
+        border-radius: 5px;
+        background: #22364c;
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      main {
+        display: flex;
+        width: min(1800px, 100%);
+        flex: 1;
+        margin: 0 auto;
+        padding: 18px;
+      }
+
+      .window-grid {
+        display: grid;
+        width: 100%;
+        min-height: 0;
+        align-items: center;
+        justify-items: center;
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+        gap: 14px;
+      }
+
+      .game-window {
+        display: flex;
+        width: min(100%, 1600px, calc(177.78vh - 266.67px));
+        min-width: 0;
+        min-height: 0;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--surface);
+        box-shadow: 0 7px 24px #0000002b;
+      }
+
+      .window-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 42px;
+        padding: 7px 10px 7px 13px;
+        background: var(--surface-raised);
+      }
+
+      .window-label {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+      }
+
+      .window-dot {
+        width: 8px;
+        height: 8px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 0 3px #54b6ff1c;
+      }
+
+      .window-state {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 400;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      iframe {
+        display: block;
+        width: 100%;
+        height: auto;
+        aspect-ratio: 16 / 9;
+        min-height: 0;
+        flex: 0 1 auto;
+        border: 0;
+        background: #080d14;
+      }
+
+      @media (max-width: 760px) {
+        .topbar { align-items: flex-start; flex-direction: column; padding: 15px; }
+        main { padding: 12px; }
+        .window-grid { grid-template-columns: 1fr; grid-template-rows: minmax(360px, 1fr); }
+        .game-window { width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="title-group">
+          <h1>金铲铲自动对战</h1>
+          <p class="subtitle">打开一个云游戏画面，进入后即可开始自动对战。</p>
+        </div>
+      </header>
+
+      <main>
+        <section class="window-grid" aria-label="金铲铲自动对战">
+          <article class="game-window" data-window="1">
+            <div class="window-bar">
+              <div class="window-label"><span class="window-dot"></span><span>金铲铲自动对战</span><span class="window-state">加载中...</span></div>
+            </div>
+            <iframe title="金铲铲自动对战" loading="eager" allow="autoplay; fullscreen; clipboard-read; clipboard-write"></iframe>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const GAME_URL = 'https://start.qq.com/game/arm-game/?ADTAG=10000000&extra=eyJob21lIjoiaHR0cHM6Ly9zdGFydC5xcS5jb20vd2ViZ2FtZS9wcmUtcGxheWluZy83MDA5Njc/ZnJvbVBhZ2U9Z2FtZV9kZXRhaWxfcGFnZSZBRFRBRz0xMDAwMDAwMCIsInN0YXJ0VmVyc2lvbiI6IjAuMTAuOTQwLjUwMDYwMDIiLCJ3ZWJjZ19jb21tb24iOjF9#/game/700967?time=1790047923464';
+      const windows = [...document.querySelectorAll('.game-window')];
+
+      function loadFrame(gameWindow) {
+        const frame = gameWindow.querySelector('iframe');
+        const state = gameWindow.querySelector('.window-state');
+        state.textContent = '加载中...';
+        frame.src = GAME_URL;
+      }
+
+      windows.forEach((gameWindow) => {
+        const frame = gameWindow.querySelector('iframe');
+        frame.addEventListener('load', () => { gameWindow.querySelector('.window-state').textContent = '已加载'; });
+        loadFrame(gameWindow);
+      });
+    </script>
+  </body>
+</html>
