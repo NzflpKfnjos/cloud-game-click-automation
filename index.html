@@ -181,19 +181,141 @@
     <script>
       const GAME_URL = 'https://start.qq.com/game/arm-game/?ADTAG=10000000&extra=eyJob21lIjoiaHR0cHM6Ly9zdGFydC5xcS5jb20vd2ViZ2FtZS9wcmUtcGxheWluZy83MDA5Njc/ZnJvbVBhZ2U9Z2FtZV9kZXRhaWxfcGFnZSZBRFRBRz0xMDAwMDAwMCIsInN0YXJ0VmVyc2lvbiI6IjAuMTAuOTQwLjUwMDYwMDIiLCJ3ZWJjZ19jb21tb24iOjF9#/game/700967?time=1790047923464';
       const windows = [...document.querySelectorAll('.game-window')];
+      const NETWORK_CHECK_INTERVAL = 15000;
+      const NETWORK_PROBE_TIMEOUT = 8000;
+      const LOAD_TIMEOUT = 60000;
+      const RECOVERY_DELAY = 1500;
+      const MAX_RETRY_DELAY = 60000;
 
-      function loadFrame(gameWindow) {
+      let isNetworkAvailable = navigator.onLine !== false;
+      let offlineSince = isNetworkAvailable ? null : Date.now();
+      let recoveryTimer = null;
+      let probeInFlight = null;
+      let recoveryAttempt = 0;
+
+      function setState(text) {
+        windows.forEach((gameWindow) => {
+          gameWindow.querySelector('.window-state').textContent = text;
+        });
+      }
+
+      function createFrameUrl() {
+        // 每次重连都添加唯一参数，确保浏览器真正重新创建跨域页面。
+        const url = new URL(GAME_URL);
+        url.searchParams.set('_reconnect', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+        return url.toString();
+      }
+
+      function loadFrame(gameWindow, reason = 'initial') {
         const frame = gameWindow.querySelector('iframe');
         const state = gameWindow.querySelector('.window-state');
-        state.textContent = '加载中...';
-        frame.src = GAME_URL;
+        const loadToken = Symbol('frame-load');
+
+        frame.__loadToken = loadToken;
+        clearTimeout(frame.__loadTimer);
+        state.textContent = reason === 'initial' ? '加载中...' : '正在重新连接...';
+        frame.src = createFrameUrl();
+        frame.__loadTimer = setTimeout(() => {
+          if (frame.__loadToken === loadToken) scheduleRecovery('加载超时');
+        }, LOAD_TIMEOUT);
+      }
+
+      function scheduleRecovery(reason) {
+        if (!isNetworkAvailable || recoveryTimer) return;
+
+        const delay = Math.min(
+          RECOVERY_DELAY * Math.max(1, 2 ** recoveryAttempt),
+          MAX_RETRY_DELAY,
+        );
+        recoveryAttempt += 1;
+        setState(`${reason}，${Math.ceil(delay / 1000)} 秒后重试...`);
+        recoveryTimer = setTimeout(async () => {
+          recoveryTimer = null;
+          if (!(await probeNetwork())) {
+            updateNetworkState(false, 'probe');
+            return;
+          }
+          windows.forEach((gameWindow) => loadFrame(gameWindow, reason));
+        }, delay);
+      }
+
+      async function probeNetwork() {
+        if (probeInFlight) return probeInFlight;
+
+        const probeUrl = `${new URL(GAME_URL).origin}/favicon.ico?_probe=${Date.now()}`;
+        probeInFlight = (async () => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), NETWORK_PROBE_TIMEOUT);
+          try {
+            await fetch(probeUrl, {
+              method: 'GET',
+              mode: 'no-cors',
+              cache: 'no-store',
+              signal: controller.signal,
+            });
+            return true;
+          } catch {
+            return false;
+          } finally {
+            clearTimeout(timeout);
+          }
+        })();
+
+        try {
+          return await probeInFlight;
+        } finally {
+          probeInFlight = null;
+        }
+      }
+
+      function updateNetworkState(available, source = 'network') {
+        if (!available) {
+          if (offlineSince === null) offlineSince = Date.now();
+          isNetworkAvailable = false;
+          clearTimeout(recoveryTimer);
+          recoveryTimer = null;
+          setState('网络已断开，等待自动恢复...');
+          return;
+        }
+
+        const wasOffline = !isNetworkAvailable;
+        const outageDuration = offlineSince === null ? 0 : Date.now() - offlineSince;
+        isNetworkAvailable = true;
+        offlineSince = null;
+
+        // 网络中断过一段时间时，旧 iframe 往往不会自行恢复，恢复后主动重建。
+        if (wasOffline && outageDuration >= 3000) {
+          scheduleRecovery(`网络已恢复（中断 ${Math.round(outageDuration / 1000)} 秒）`);
+        } else if (source === 'probe' && recoveryAttempt > 0) {
+          scheduleRecovery('连接不稳定');
+        }
+      }
+
+      async function checkNetwork() {
+        const available = navigator.onLine !== false && await probeNetwork();
+        updateNetworkState(available, 'probe');
       }
 
       windows.forEach((gameWindow) => {
         const frame = gameWindow.querySelector('iframe');
-        frame.addEventListener('load', () => { gameWindow.querySelector('.window-state').textContent = '已加载'; });
+        frame.addEventListener('load', () => {
+          clearTimeout(frame.__loadTimer);
+          clearTimeout(recoveryTimer);
+          recoveryTimer = null;
+          recoveryAttempt = 0;
+          gameWindow.querySelector('.window-state').textContent = '已加载';
+        });
+        frame.addEventListener('error', () => scheduleRecovery('页面加载失败'));
         loadFrame(gameWindow);
       });
+
+      window.addEventListener('offline', () => updateNetworkState(false, 'event'));
+      window.addEventListener('online', () => checkNetwork());
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) checkNetwork();
+      });
+      setInterval(checkNetwork, NETWORK_CHECK_INTERVAL);
+      checkNetwork();
     </script>
   </body>
 </html>
