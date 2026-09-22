@@ -59,6 +59,16 @@
         font-size: 12px;
       }
 
+      .subtitle a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      .subtitle a:hover,
+      .subtitle a:focus-visible {
+        text-decoration: underline;
+      }
+
       button {
         min-height: 34px;
         padding: 7px 12px;
@@ -162,7 +172,11 @@
       <header class="topbar">
         <div class="title-group">
           <h1>金铲铲自动对战</h1>
-          <p class="subtitle">打开一个云游戏画面，进入后即可开始自动对战。</p>
+          <p class="subtitle">
+            <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey 官网</a>
+            <span aria-hidden="true"> · </span>
+            <a href="https://jcc.5678989.eu.org/cloud-game-click-automation.user.js" target="_blank" rel="noopener noreferrer">自动化脚本</a>
+          </p>
         </div>
       </header>
 
