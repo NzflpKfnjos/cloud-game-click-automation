@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         云游戏点击脚本助手
 // @namespace    local.cloud-game-clicker
-// @version      1.2.0
+// @version      1.3.1
 // @description  记录并按顺序重放云游戏画布上的点击位置
 // @match        https://start.qq.com/game/arm-game/*
 // @run-at       document-idle
@@ -42,7 +42,7 @@
         <button class="danger" data-action="stop">停止</button>
       </div>
       <div class="cgca-fields">
-        <label>间隔(ms)<input data-role="interval" type="number" min="30" step="10" value="500"></label>
+        <label>间隔(ms)<input data-role="interval" type="number" min="30" step="10" value="3000"></label>
         <label>循环(0=无限)<input data-role="loops" type="number" min="0" step="1" value="0"></label>
       </div>
       <div class="cgca-row">
@@ -89,8 +89,21 @@
     #cgca-panel .cgca-help { margin-top:8px; color:#8194aa; font-size:11px; }
     #cgca-panel.cgca-collapsed { width:168px; }
     #cgca-panel.cgca-collapsed .cgca-body { display:none; }
+    #cgca-markers { position:fixed; inset:0; z-index:2147483646; pointer-events:none; overflow:hidden; }
+    #cgca-markers .cgca-marker { position:fixed; width:26px; height:26px; transform:translate(-50%,-50%); border:2px solid #43d9ff;
+      border-radius:50%; background:#087a9caa; box-shadow:0 0 0 2px #06253299, 0 0 12px #43d9ff; color:#fff; font:bold 12px/22px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      text-align:center; text-shadow:0 1px 2px #000; transition:width .12s,height .12s,background .12s,border-color .12s,box-shadow .12s; }
+    #cgca-markers .cgca-marker::before, #cgca-markers .cgca-marker::after { content:""; position:absolute; background:#43d9ff; opacity:.85; }
+    #cgca-markers .cgca-marker::before { width:38px; height:1px; left:-8px; top:11px; }
+    #cgca-markers .cgca-marker::after { width:1px; height:38px; left:11px; top:-8px; }
+    #cgca-markers .cgca-marker.cgca-active { width:36px; height:36px; line-height:32px; background:#d66c08dd; border-color:#ffd166; box-shadow:0 0 0 3px #ff9f1c88, 0 0 24px #ff9f1c; animation:cgca-marker-pulse .65s ease-in-out infinite alternate; }
+    #cgca-markers .cgca-marker.cgca-active::before, #cgca-markers .cgca-marker.cgca-active::after { background:#ffd166; }
+    #cgca-markers .cgca-marker .cgca-marker-label { position:absolute; left:50%; top:29px; transform:translateX(-50%); white-space:nowrap; padding:2px 5px; border-radius:3px; background:#062532dd; color:#dff8ff; font:11px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    @keyframes cgca-marker-pulse { to { transform:translate(-50%,-50%) scale(1.12); } }
   `;
-  document.documentElement.append(style, panel);
+  const markerLayer = document.createElement('div');
+  markerLayer.id = 'cgca-markers';
+  document.documentElement.append(style, markerLayer, panel);
 
   const statusEl = panel.querySelector('[data-role="status"]');
   const listEl = panel.querySelector('[data-role="list"]');
@@ -99,6 +112,7 @@
   const recordButton = panel.querySelector('[data-action="record"]');
   const runButton = panel.querySelector('[data-action="run"]');
   const stopButton = panel.querySelector('[data-action="stop"]');
+  let markerNodes = [];
 
   function loadPoints() {
     try {
@@ -114,6 +128,48 @@
   }
 
   function setStatus(text) { statusEl.textContent = text; }
+
+  function markerPosition(point) {
+    if (point.global) return { x: point.x * innerWidth, y: point.y * innerHeight };
+    const surface = getSurface(point);
+    if (!surface) return { x: point.x * innerWidth, y: point.y * innerHeight };
+    const rect = surface.getBoundingClientRect();
+    return {
+      x: rect.left + point.x * rect.width,
+      y: rect.top + point.y * rect.height,
+    };
+  }
+
+  function positionMarkers() {
+    markerNodes.forEach(({ node, point }) => {
+      const { x, y } = markerPosition(point);
+      node.style.left = `${x}px`;
+      node.style.top = `${y}px`;
+    });
+  }
+
+  function renderMarkers() {
+    markerLayer.replaceChildren();
+    markerNodes = state.points.map((point, index) => {
+      const marker = document.createElement('div');
+      marker.className = 'cgca-marker';
+      marker.dataset.index = String(index);
+      marker.textContent = String(index + 1);
+      const label = document.createElement('span');
+      label.className = 'cgca-marker-label';
+      label.textContent = point.global ? '窗口' : '画布';
+      marker.append(label);
+      markerLayer.append(marker);
+      return { node: marker, point };
+    });
+    positionMarkers();
+  }
+
+  function setActiveMarker(index) {
+    markerNodes.forEach(({ node }, markerIndex) => {
+      node.classList.toggle('cgca-active', markerIndex === index);
+    });
+  }
 
   function updateRunningUI() {
     panel.classList.toggle('cgca-running', state.running);
@@ -142,6 +198,7 @@
       item.append(remove);
       listEl.append(item);
     });
+    renderMarkers();
   }
 
   function getSurface(referencePoint = null) {
@@ -222,6 +279,7 @@
       while (!state.stopRequested && (state.loop === 0 || completed < state.loop)) {
         for (let index = 0; index < points.length; index += 1) {
           if (state.stopRequested) break;
+          setActiveMarker(index);
           emitClick(points[index]);
           setStatus(state.loop === 0
             ? `运行中 · 第 ${completed + 1} 轮 · 坐标 ${index + 1}/${points.length}`
@@ -234,6 +292,7 @@
       const wasStopped = state.stopRequested;
       state.running = false;
       state.stopRequested = false;
+      setActiveMarker(-1);
       updateRunningUI();
       setStatus(wasStopped ? `已停止 · 已完成 ${completed} 轮` : `运行完成 · 共 ${completed} 轮`);
     }
@@ -297,6 +356,18 @@
     panel.style.right = 'auto';
   });
   panel.querySelector('.cgca-head').addEventListener('pointerup', () => { drag = null; });
+
+  let markerFrame = 0;
+  const refreshMarkers = () => {
+    if (markerFrame) return;
+    markerFrame = requestAnimationFrame(() => {
+      markerFrame = 0;
+      positionMarkers();
+    });
+  };
+  window.addEventListener('resize', refreshMarkers, { passive: true });
+  window.addEventListener('scroll', refreshMarkers, { passive: true, capture: true });
+  setInterval(positionMarkers, 500);
 
   updateRunningUI();
   renderList();
