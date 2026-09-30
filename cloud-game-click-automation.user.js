@@ -12,14 +12,26 @@
   'use strict';
 
   const STORAGE_KEY = 'cloud-game-click-automation-v1';
-  const DEFAULT_POINTS = [
-    { x: 0.8185719600340136, y: 0.8710210272606383, global: false },
-    { x: 0.5320976828231293, y: 0.818842461768617, global: false },
-    { x: 0.8715056335034014, y: 0.8637435588430851, global: false },
-    { x: 0.8697119472789115, y: 0.8713690575132979, global: false },
-    { x: 0.4544908588435374, y: 0.8035941475826972, global: false },
-  ];
+  const APP_CONFIGS = {
+    jcc: {
+      name: '金铲铲',
+      defaultPoints: [
+        { x: 0.8185719600340136, y: 0.8710210272606383, global: false },
+        { x: 0.5320976828231293, y: 0.818842461768617, global: false },
+        { x: 0.8715056335034014, y: 0.8637435588430851, global: false },
+        { x: 0.8697119472789115, y: 0.8713690575132979, global: false },
+        { x: 0.4544908588435374, y: 0.8035941475826972, global: false },
+        { x: 0.6525787965616046, y: 0.37830507957329185, global: true },
+        { x: 0.8916428122374139, y: 0.1155932203440343, global: false, surfaceRatio: 1.7745762711864406 },
+      ],
+    },
+    naruto: {
+      name: '火影忍者',
+      defaultPoints: [],
+    },
+  };
   const state = {
+    appKey: 'jcc',
     points: loadPoints(),
     recording: false,
     running: false,
@@ -35,6 +47,10 @@
       <button data-action="minimize" title="折叠面板">−</button>
     </div>
     <div class="cgca-body">
+      <label class="cgca-app-picker">应用<select data-role="app">
+        <option value="jcc">金铲铲</option>
+        <option value="naruto">火影忍者</option>
+      </select></label>
       <div class="cgca-status" data-role="status">就绪。先点击“记录”，再点击游戏画面。</div>
       <div class="cgca-row">
         <button class="primary" data-action="record">记录</button>
@@ -81,6 +97,8 @@
     @keyframes cgca-pulse { 50% { box-shadow:inset 0 0 0 1px #ffc45c66; } }
     @keyframes cgca-blink { 50% { opacity:.25; } }
     #cgca-panel .cgca-fields { display:flex; gap:7px; margin-top:8px; }
+    #cgca-panel .cgca-app-picker { display:block; margin-bottom:8px; color:#aabbd0; font-size:12px; }
+    #cgca-panel .cgca-app-picker select { display:block; width:100%; margin-top:3px; padding:5px 6px; color:#edf3fa; background:#0f1721; border:1px solid #53657a; border-radius:4px; font:inherit; }
     #cgca-panel label { flex:1; color:#aabbd0; font-size:12px; }
     #cgca-panel input { display:block; width:100%; margin-top:3px; padding:5px 6px; color:#edf3fa; background:#0f1721; border:1px solid #53657a; border-radius:4px; }
     #cgca-panel ol { max-height:160px; margin:9px 0 0; padding:0 0 0 24px; overflow:auto; }
@@ -106,6 +124,7 @@
   document.documentElement.append(style, markerLayer, panel);
 
   const statusEl = panel.querySelector('[data-role="status"]');
+  const appEl = panel.querySelector('[data-role="app"]');
   const listEl = panel.querySelector('[data-role="list"]');
   const intervalEl = panel.querySelector('[data-role="interval"]');
   const loopsEl = panel.querySelector('[data-role="loops"]');
@@ -114,20 +133,45 @@
   const stopButton = panel.querySelector('[data-action="stop"]');
   let markerNodes = [];
 
-  function loadPoints() {
+  function loadPoints(appKey = 'jcc') {
+    const defaults = APP_CONFIGS[appKey].defaultPoints;
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved === null) return DEFAULT_POINTS.map((point) => ({ ...point }));
+      if (saved === null) return defaults.map((point) => ({ ...point }));
       const value = JSON.parse(saved);
-      return Array.isArray(value) ? value : [];
-    } catch (_) { return []; }
+      if (Array.isArray(value)) {
+        // 兼容旧版本的单应用坐标数据，并将其视为金铲铲配置。
+        return appKey === 'jcc' ? value : defaults.map((point) => ({ ...point }));
+      }
+      return Array.isArray(value[appKey]) ? value[appKey] : defaults.map((point) => ({ ...point }));
+    } catch (_) { return defaults.map((point) => ({ ...point })); }
   }
 
   function savePoints() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.points));
+    let saved = {};
+    try {
+      const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      if (value && !Array.isArray(value) && typeof value === 'object') saved = value;
+    } catch (_) { /* 使用空配置覆盖无效存储。 */ }
+    saved[state.appKey] = state.points;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
   }
 
   function setStatus(text) { statusEl.textContent = text; }
+
+  function switchApp(appKey) {
+    if (!APP_CONFIGS[appKey] || appKey === state.appKey) return;
+    if (state.running) stop();
+    savePoints();
+    state.appKey = appKey;
+    state.points = loadPoints(appKey);
+    appEl.value = appKey;
+    recordButton.textContent = '记录';
+    state.recording = false;
+    renderList();
+    setStatus(`${APP_CONFIGS[appKey].name}已切换。`);
+  }
+
 
   function markerPosition(point) {
     if (point.global) return { x: point.x * innerWidth, y: point.y * innerHeight };
@@ -311,6 +355,8 @@
     renderList();
     setStatus(`已记录第 ${state.points.length} 个坐标，继续点击可继续记录。`);
   }, true);
+
+  appEl.addEventListener('change', () => switchApp(appEl.value));
 
   panel.addEventListener('click', (event) => {
     const action = event.target.closest('[data-action]')?.dataset.action;
