@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         云游戏点击脚本助手
 // @namespace    local.cloud-game-clicker
-// @version      1.3.1
-// @description  记录并按顺序重放云游戏画布上的点击位置
+// @version      1.4.0
+// @description  记录并按顺序重放云游戏画布上的点击位置，并上报画面/连接诊断信息
 // @match        https://start.qq.com/game/arm-game/*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
@@ -12,7 +12,165 @@
   'use strict';
 
   const STORAGE_KEY = 'cloud-game-click-automation-v1';
-  const APP_CONFIGS = {
+  const DIAGNOSTIC_MESSAGE_TYPE = 'cgca-diagnostic-v1';
+  const trackedPeerConnections = new Set();
+  const diagnosticState = {
+    heartbeatSequence: 0,
+    lastLongTask: null,
+    lastError: null,
+  };
+
+  function reportDiagnostic(event, details = {}) {
+    const message = {
+      type: DIAGNOSTIC_MESSAGE_TYPE,
+      event,
+      timestamp: Date.now(),
+      url: location.href,
+      visibility: document.visibilityState,
+      ...details,
+    };
+    if (window.parent !== window) window.parent.postMessage(message, '*');
+    if (event !== 'heartbeat') console.info('[CGCA diagnostic]', message);
+  }
+
+  function installPeerConnectionMonitor(propertyName) {
+    const NativePeerConnection = window[propertyName];
+    if (typeof NativePeerConnection !== 'function' || NativePeerConnection.__cgcaWrapped) return;
+
+    function MonitoredPeerConnection(...args) {
+      const connection = new NativePeerConnection(...args);
+      trackedPeerConnections.add(connection);
+      connection.addEventListener('connectionstatechange', () => {
+        reportDiagnostic('peer-connection-state', {
+          connectionState: connection.connectionState,
+          iceConnectionState: connection.iceConnectionState,
+        });
+        if (['closed', 'failed'].includes(connection.connectionState)) trackedPeerConnections.delete(connection);
+      });
+      connection.addEventListener('iceconnectionstatechange', () => {
+        reportDiagnostic('ice-connection-state', {
+          connectionState: connection.connectionState,
+          iceConnectionState: connection.iceConnectionState,
+        });
+      });
+      return connection;
+    }
+
+    try {
+      MonitoredPeerConnection.prototype = NativePeerConnection.prototype;
+      Object.setPrototypeOf(MonitoredPeerConnection, NativePeerConnection);
+      Object.defineProperty(MonitoredPeerConnection, '__cgcaWrapped', { value: true });
+      window[propertyName] = MonitoredPeerConnection;
+    } catch (error) {
+      console.warn(`[CGCA diagnostic] 无法监控 ${propertyName}`, error);
+    }
+  }
+
+  installPeerConnectionMonitor('RTCPeerConnection');
+  installPeerConnectionMonitor('webkitRTCPeerConnection');
+
+  window.addEventListener('error', (event) => {
+    diagnosticState.lastError = {
+      message: event.message || 'Unknown window error',
+      source: event.filename || '',
+      line: event.lineno || 0,
+      column: event.colno || 0,
+    };
+    reportDiagnostic('window-error', { error: diagnosticState.lastError });
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason instanceof Error
+      ? `${event.reason.name}: ${event.reason.message}`
+      : String(event.reason);
+    diagnosticState.lastError = { message: reason };
+    reportDiagnostic('unhandled-rejection', { error: diagnosticState.lastError });
+  });
+
+  if (typeof PerformanceObserver === 'function') {
+    try {
+      const longTaskObserver = new PerformanceObserver((list) => {
+        const entries = list.getEntries();
+        const latest = entries[entries.length - 1];
+        if (!latest) return;
+        diagnosticState.lastLongTask = {
+          startTime: Math.round(latest.startTime),
+          duration: Math.round(latest.duration),
+          observedAt: Date.now(),
+        };
+        if (latest.duration >= 1000) reportDiagnostic('long-task', { longTask: diagnosticState.lastLongTask });
+      });
+      longTaskObserver.observe({ type: 'longtask', buffered: true });
+    } catch (_) { /* 浏览器不支持 longtask 监控时忽略。 */ }
+  }
+
+  async function collectMediaDiagnostics() {
+    const media = [...document.querySelectorAll('video')].map((video, index) => {
+      let quality = null;
+      try {
+        const value = video.getVideoPlaybackQuality?.();
+        if (value) quality = {
+          totalVideoFrames: value.totalVideoFrames,
+          droppedVideoFrames: value.droppedVideoFrames,
+          corruptedVideoFrames: value.corruptedVideoFrames,
+        };
+      } catch (_) { /* 某些浏览器不开放播放质量。 */ }
+      return {
+        index,
+        currentTime: Number(video.currentTime.toFixed(3)),
+        readyState: video.readyState,
+        networkState: video.networkState,
+        paused: video.paused,
+        ended: video.ended,
+        width: video.videoWidth,
+        height: video.videoHeight,
+        quality,
+      };
+    });
+
+    const webrtc = { connections: 0, inboundVideo: 0, bytesReceived: 0, packetsReceived: 0, framesDecoded: 0, framesDropped: 0 };
+    const connections = [...trackedPeerConnections].filter((connection) => connection.connectionState !== 'closed');
+    webrtc.connections = connections.length;
+    await Promise.all(connections.map(async (connection) => {
+      try {
+        const reports = await connection.getStats();
+        reports.forEach((report) => {
+          if (report.type !== 'inbound-rtp' || report.kind !== 'video') return;
+          webrtc.inboundVideo += 1;
+          webrtc.bytesReceived += Number(report.bytesReceived || 0);
+          webrtc.packetsReceived += Number(report.packetsReceived || 0);
+          webrtc.framesDecoded += Number(report.framesDecoded || 0);
+          webrtc.framesDropped += Number(report.framesDropped || 0);
+        });
+      } catch (error) {
+        reportDiagnostic('stats-error', { error: { message: String(error) } });
+      }
+    }));
+
+    return { media, webrtc };
+  }
+
+  async function sendHeartbeat() {
+    try {
+      const diagnostics = await collectMediaDiagnostics();
+      reportDiagnostic('heartbeat', {
+        sequence: ++diagnosticState.heartbeatSequence,
+        diagnostics,
+        lastLongTask: diagnosticState.lastLongTask,
+        lastError: diagnosticState.lastError,
+      });
+    } catch (error) {
+      reportDiagnostic('heartbeat-error', { error: { message: String(error) } });
+    }
+  }
+
+  setInterval(sendHeartbeat, 5000);
+  window.addEventListener('pageshow', () => reportDiagnostic('pageshow'));
+  window.addEventListener('pagehide', () => reportDiagnostic('pagehide'));
+  document.addEventListener('visibilitychange', () => reportDiagnostic('visibility-change'));
+  setTimeout(sendHeartbeat, 1000);
+
+  function initAutomationUI() {
+    const APP_CONFIGS = {
     jcc: {
       name: '金铲铲',
       defaultInterval: 10000,
@@ -428,6 +586,13 @@
   window.addEventListener('scroll', refreshMarkers, { passive: true, capture: true });
   setInterval(positionMarkers, 500);
 
-  updateRunningUI();
-  renderList();
+    updateRunningUI();
+    renderList();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initAutomationUI, { once: true });
+  } else {
+    initAutomationUI();
+  }
 })();

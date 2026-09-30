@@ -168,6 +168,25 @@
         white-space: nowrap;
       }
 
+      .window-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+      .window-actions button { min-height: 28px; padding: 4px 9px; font-size: 12px; }
+
+      .diagnostic-panel {
+        display: none;
+        max-height: 220px;
+        margin: 0;
+        padding: 10px 12px;
+        overflow: auto;
+        border-top: 1px solid var(--border);
+        background: #0a111a;
+        color: #b9c9d9;
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .diagnostic-panel.is-open { display: block; }
+
       iframe {
         display: block;
         width: 100%;
@@ -216,8 +235,14 @@
           <article class="game-window" data-window="1">
             <div class="window-bar">
               <div class="window-label"><span class="window-dot"></span><span data-role="window-title">金铲铲自动对战</span><span class="window-state">加载中...</span></div>
+              <div class="window-actions">
+                <button type="button" data-action="reconnect">重新连接</button>
+                <button type="button" data-action="diagnostics">诊断日志</button>
+                <button type="button" data-action="export-log">导出日志</button>
+              </div>
             </div>
             <iframe title="金铲铲自动对战" loading="eager" allow="autoplay; fullscreen; clipboard-read; clipboard-write"></iframe>
+            <pre class="diagnostic-panel" data-role="diagnostic-log" aria-live="polite"></pre>
           </article>
         </section>
       </main>
@@ -234,21 +259,86 @@
           url: 'https://start.qq.com/game/arm-game/?ADTAG=10000000&extra=eyJob21lIjoiaHR0cHM6Ly9zdGFydC5xcS5jb20vd2ViZ2FtZS9wcmUtcGxheWluZy83MDA3MjQ/ZnJvbVBhZ2U9Z2FtZV9kZXRhaWxfcGFnZSZBRFRBRz0xMDAwMDAwMCIsInN0YXJ0VmVyc2lvbiI6IjAuMTAuOTAwLjUwMDYwMDIiLCJ3ZWJjZ19jb21tb24iOjF9#/game/700724?time=1790742724938',
         },
       };
-      const appSelect = document.querySelector('#app-select');
-      const windowGrid = document.querySelector('.window-grid');
-      const windows = [...document.querySelectorAll('.game-window')];
-      let currentApp = APPS[appSelect.value];
+
+      const DIAGNOSTIC_MESSAGE_TYPE = 'cgca-diagnostic-v1';
+      const LOG_STORAGE_KEY = 'cgca-diagnostic-log-v1';
+      const MAX_LOG_ENTRIES = 300;
       const NETWORK_CHECK_INTERVAL = 15000;
       const NETWORK_PROBE_TIMEOUT = 8000;
       const LOAD_TIMEOUT = 60000;
       const RECOVERY_DELAY = 1500;
       const MAX_RETRY_DELAY = 60000;
+      const HEARTBEAT_TIMEOUT = 25000;
+      const MEDIA_STALL_TIMEOUT = 45000;
+      const WATCHDOG_WARMUP = 90000;
 
+      const appSelect = document.querySelector('#app-select');
+      const windowGrid = document.querySelector('.window-grid');
+      const windows = [...document.querySelectorAll('.game-window')];
+      const diagnosticPanel = document.querySelector('[data-role="diagnostic-log"]');
+      let currentApp = APPS[appSelect.value];
       let isNetworkAvailable = navigator.onLine !== false;
       let offlineSince = isNetworkAvailable ? null : Date.now();
       let recoveryTimer = null;
       let probeInFlight = null;
       let recoveryAttempt = 0;
+      let recentAutomaticRecoveries = [];
+      let monitorMissingLogged = false;
+      let logs = loadLogs();
+      const health = createEmptyHealth();
+
+      function createEmptyHealth() {
+        return {
+          loadedAt: Date.now(),
+          lastHeartbeatAt: 0,
+          lastProgressAt: 0,
+          lastMetrics: null,
+          lastSequence: 0,
+          hasMonitor: false,
+        };
+      }
+
+      function resetHealth() {
+        Object.assign(health, createEmptyHealth());
+        monitorMissingLogged = false;
+      }
+
+      function loadLogs() {
+        try {
+          const value = JSON.parse(localStorage.getItem(LOG_STORAGE_KEY) || '[]');
+          return Array.isArray(value) ? value.slice(-MAX_LOG_ENTRIES) : [];
+        } catch {
+          return [];
+        }
+      }
+
+      function addLog(level, event, details = {}) {
+        const entry = {
+          timestamp: new Date().toISOString(),
+          level,
+          event,
+          app: appSelect.value,
+          online: navigator.onLine,
+          visibility: document.visibilityState,
+          details,
+        };
+        logs.push(entry);
+        logs = logs.slice(-MAX_LOG_ENTRIES);
+        try { localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(logs)); } catch { /* 存储空间不足不影响运行。 */ }
+        renderLogs();
+        const method = level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info';
+        console[method]('[CGCA]', event, details);
+      }
+
+      function renderLogs() {
+        const visibleLogs = logs.slice(-80).map((entry) => {
+          const time = new Date(entry.timestamp).toLocaleString('zh-CN', { hour12: false });
+          const details = Object.keys(entry.details || {}).length ? ` ${JSON.stringify(entry.details)}` : '';
+          return `[${time}] [${entry.level.toUpperCase()}] ${entry.event}${details}`;
+        });
+        diagnosticPanel.textContent = visibleLogs.join('\n') || '暂无诊断日志。';
+        diagnosticPanel.scrollTop = diagnosticPanel.scrollHeight;
+      }
 
       function setState(text) {
         windows.forEach((gameWindow) => {
@@ -257,7 +347,6 @@
       }
 
       function createFrameUrl() {
-        // 每次重连都添加唯一参数，确保浏览器真正重新创建跨域页面。
         const url = new URL(currentApp.url);
         url.searchParams.set('_reconnect', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
         return url.toString();
@@ -277,33 +366,42 @@
         recoveryAttempt = 0;
         clearTimeout(recoveryTimer);
         recoveryTimer = null;
+        addLog('info', '切换应用', { appKey, name: app.name });
         loadFrame(windows[0], 'switch');
         checkNetwork();
       }
+
       function loadFrame(gameWindow, reason = 'initial') {
         const frame = gameWindow.querySelector('iframe');
         const state = gameWindow.querySelector('.window-state');
         const loadToken = Symbol('frame-load');
-
         frame.__loadToken = loadToken;
         clearTimeout(frame.__loadTimer);
+        resetHealth();
         state.textContent = reason === 'initial' ? '加载中...' : '正在重新连接...';
+        addLog('info', '重建嵌套页面', { reason, attempt: recoveryAttempt });
         frame.src = createFrameUrl();
         frame.__loadTimer = setTimeout(() => {
           if (frame.__loadToken === loadToken) scheduleRecovery('加载超时');
         }, LOAD_TIMEOUT);
       }
 
-
-      function scheduleRecovery(reason) {
+      function scheduleRecovery(reason, details = {}) {
         if (!isNetworkAvailable || recoveryTimer) return;
 
-        const delay = Math.min(
-          RECOVERY_DELAY * Math.max(1, 2 ** recoveryAttempt),
-          MAX_RETRY_DELAY,
-        );
+        const now = Date.now();
+        recentAutomaticRecoveries = recentAutomaticRecoveries.filter((time) => now - time < 15 * 60 * 1000);
+        if (recentAutomaticRecoveries.length >= 3) {
+          setState('连续恢复失败，请查看诊断日志或手动重连');
+          addLog('error', '停止自动恢复：15 分钟内已重试 3 次', { reason, ...details });
+          return;
+        }
+
+        const delay = Math.min(RECOVERY_DELAY * Math.max(1, 2 ** recoveryAttempt), MAX_RETRY_DELAY);
         recoveryAttempt += 1;
+        recentAutomaticRecoveries.push(now);
         setState(`${reason}，${Math.ceil(delay / 1000)} 秒后重试...`);
+        addLog('warn', '计划自动恢复', { reason, delay, ...details });
         recoveryTimer = setTimeout(async () => {
           recoveryTimer = null;
           if (!(await probeNetwork())) {
@@ -316,7 +414,6 @@
 
       async function probeNetwork() {
         if (probeInFlight) return probeInFlight;
-
         const probeUrl = `${new URL(currentApp.url).origin}/favicon.ico?_probe=${Date.now()}`;
         probeInFlight = (async () => {
           const controller = new AbortController();
@@ -329,13 +426,13 @@
               signal: controller.signal,
             });
             return true;
-          } catch {
+          } catch (error) {
+            addLog('warn', '网络探测失败', { message: String(error) });
             return false;
           } finally {
             clearTimeout(timeout);
           }
         })();
-
         try {
           return await probeInFlight;
         } finally {
@@ -345,7 +442,10 @@
 
       function updateNetworkState(available, source = 'network') {
         if (!available) {
-          if (offlineSince === null) offlineSince = Date.now();
+          if (offlineSince === null) {
+            offlineSince = Date.now();
+            addLog('warn', '网络不可用', { source });
+          }
           isNetworkAvailable = false;
           clearTimeout(recoveryTimer);
           recoveryTimer = null;
@@ -357,11 +457,11 @@
         const outageDuration = offlineSince === null ? 0 : Date.now() - offlineSince;
         isNetworkAvailable = true;
         offlineSince = null;
+        if (wasOffline) addLog('info', '网络已恢复', { source, outageDuration });
 
-        // 网络中断过一段时间时，旧 iframe 往往不会自行恢复，恢复后主动重建。
         if (wasOffline && outageDuration >= 3000) {
           scheduleRecovery(`网络已恢复（中断 ${Math.round(outageDuration / 1000)} 秒）`);
-        } else if (source === 'probe' && recoveryAttempt > 0) {
+        } else if (source === 'probe' && recoveryAttempt > 0 && !health.hasMonitor) {
           scheduleRecovery('连接不稳定');
         }
       }
@@ -371,7 +471,137 @@
         updateNetworkState(available, 'probe');
       }
 
+      function extractProgressMetrics(diagnostics) {
+        const webrtc = diagnostics?.webrtc;
+        if (webrtc?.inboundVideo > 0) {
+          return {
+            source: 'webrtc',
+            bytesReceived: Number(webrtc.bytesReceived || 0),
+            packetsReceived: Number(webrtc.packetsReceived || 0),
+            framesDecoded: Number(webrtc.framesDecoded || 0),
+          };
+        }
+        const video = diagnostics?.media?.find((item) => !item.ended && item.readyState >= 2);
+        if (!video) return null;
+        return {
+          source: 'video',
+          currentTime: Number(video.currentTime || 0),
+          totalVideoFrames: Number(video.quality?.totalVideoFrames || 0),
+        };
+      }
+
+      function metricsAdvanced(previous, current) {
+        if (!current) return false;
+        if (!previous || previous.source !== current.source) return true;
+        if (current.source === 'webrtc') {
+          return current.bytesReceived > previous.bytesReceived
+            || current.packetsReceived > previous.packetsReceived
+            || current.framesDecoded > previous.framesDecoded;
+        }
+        return current.currentTime > previous.currentTime + 0.05
+          || current.totalVideoFrames > previous.totalVideoFrames;
+      }
+
+      function handleDiagnosticMessage(event) {
+        const frame = windows[0].querySelector('iframe');
+        const message = event.data;
+        if (event.source !== frame.contentWindow
+          || event.origin !== 'https://start.qq.com'
+          || !message
+          || message.type !== DIAGNOSTIC_MESSAGE_TYPE) return;
+
+        if (message.event !== 'heartbeat') {
+          addLog(message.event.includes('error') ? 'error' : 'info', `内嵌页：${message.event}`, message);
+          return;
+        }
+
+        const now = Date.now();
+        const firstHeartbeat = !health.hasMonitor;
+        health.hasMonitor = true;
+        health.lastHeartbeatAt = now;
+        health.lastSequence = Number(message.sequence || 0);
+        const metrics = extractProgressMetrics(message.diagnostics);
+        if (metricsAdvanced(health.lastMetrics, metrics)) health.lastProgressAt = now;
+        if (!health.lastProgressAt) health.lastProgressAt = now;
+        if (metrics) health.lastMetrics = metrics;
+
+        if (firstHeartbeat) {
+          setState('运行正常 · 监控已连接');
+          addLog('info', '诊断监控已连接', {
+            webrtcConnections: message.diagnostics?.webrtc?.connections || 0,
+            videoElements: message.diagnostics?.media?.length || 0,
+          });
+        }
+      }
+
+      function runWatchdog() {
+        if (document.hidden || !isNetworkAvailable || recoveryTimer) return;
+        const now = Date.now();
+        const runningFor = now - health.loadedAt;
+        if (runningFor < WATCHDOG_WARMUP) return;
+
+        if (!health.hasMonitor) {
+          if (!monitorMissingLogged) {
+            monitorMissingLogged = true;
+            addLog('warn', '未收到内嵌页监控心跳', {
+              action: '请确认 Tampermonkey 脚本已更新到 1.4.0，并允许在 iframe 中运行',
+            });
+          }
+          return;
+        }
+
+        const heartbeatAge = now - health.lastHeartbeatAt;
+        if (heartbeatAge > HEARTBEAT_TIMEOUT) {
+          scheduleRecovery('内嵌页面无响应', { heartbeatAge, lastSequence: health.lastSequence });
+          return;
+        }
+
+        if (health.lastMetrics) {
+          const stalledFor = now - health.lastProgressAt;
+          if (stalledFor > MEDIA_STALL_TIMEOUT) {
+            scheduleRecovery('检测到画面停止更新', {
+              stalledFor,
+              metrics: health.lastMetrics,
+              heartbeatAge,
+            });
+          }
+        }
+      }
+
+      function manualReconnect() {
+        clearTimeout(recoveryTimer);
+        recoveryTimer = null;
+        recoveryAttempt = 0;
+        recentAutomaticRecoveries = [];
+        addLog('info', '用户手动重新连接');
+        windows.forEach((gameWindow) => loadFrame(gameWindow, 'manual'));
+      }
+
+      function exportLogs() {
+        addLog('info', '导出诊断日志', { count: logs.length });
+        const payload = {
+          exportedAt: new Date().toISOString(),
+          userAgent: navigator.userAgent,
+          app: appSelect.value,
+          health,
+          logs,
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `cgca-diagnostic-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      }
+
       appSelect.addEventListener('change', () => selectApp(appSelect.value));
+      document.querySelector('[data-action="reconnect"]').addEventListener('click', manualReconnect);
+      document.querySelector('[data-action="diagnostics"]').addEventListener('click', () => {
+        diagnosticPanel.classList.toggle('is-open');
+        renderLogs();
+      });
+      document.querySelector('[data-action="export-log"]').addEventListener('click', exportLogs);
+      window.addEventListener('message', handleDiagnosticMessage);
 
       windows.forEach((gameWindow) => {
         const frame = gameWindow.querySelector('iframe');
@@ -380,18 +610,40 @@
           clearTimeout(recoveryTimer);
           recoveryTimer = null;
           recoveryAttempt = 0;
-          gameWindow.querySelector('.window-state').textContent = '已加载';
+          health.loadedAt = Date.now();
+          gameWindow.querySelector('.window-state').textContent = '已加载 · 等待画面监控';
+          addLog('info', '内嵌页面 load 事件完成');
         });
-        frame.addEventListener('error', () => scheduleRecovery('页面加载失败'));
+        frame.addEventListener('error', () => {
+          addLog('error', '内嵌页面加载失败');
+          scheduleRecovery('页面加载失败');
+        });
         loadFrame(gameWindow);
       });
 
       window.addEventListener('offline', () => updateNetworkState(false, 'event'));
       window.addEventListener('online', () => checkNetwork());
+      window.addEventListener('error', (event) => addLog('error', '外层页面脚本错误', {
+        message: event.message,
+        source: event.filename,
+        line: event.lineno,
+        column: event.colno,
+      }));
+      window.addEventListener('unhandledrejection', (event) => addLog('error', '外层页面 Promise 异常', {
+        reason: String(event.reason),
+      }));
       document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) checkNetwork();
+        addLog('info', '页面可见性变化', { visibility: document.visibilityState });
+        if (!document.hidden) {
+          health.lastProgressAt = Date.now();
+          checkNetwork();
+        }
       });
+
+      renderLogs();
+      addLog('info', '页面监控启动', { version: '1.4.0' });
       setInterval(checkNetwork, NETWORK_CHECK_INTERVAL);
+      setInterval(runWatchdog, 10000);
       checkNetwork();
     </script>
   </body>
