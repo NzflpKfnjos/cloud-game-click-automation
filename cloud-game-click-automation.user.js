@@ -27,7 +27,10 @@
     },
     naruto: {
       name: '火影忍者',
-      defaultPoints: [],
+      defaultPoints: [
+        { x: 0.9115090852010899, y: 0.8396610376440873, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.9107450089900405, y: 0.8369491628923659, global: false, surfaceRatio: 1.7745762711864406 },
+      ],
     },
   };
   function detectAppKey() {
