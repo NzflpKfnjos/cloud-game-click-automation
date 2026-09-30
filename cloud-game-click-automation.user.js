@@ -30,9 +30,16 @@
       defaultPoints: [],
     },
   };
+  function detectAppKey() {
+    const url = window.location.href;
+    if (url.includes('/game/700724')) return 'naruto';
+    if (url.includes('/game/700967')) return 'jcc';
+    return 'jcc';
+  }
+
   const state = {
-    appKey: 'jcc',
-    points: loadPoints(),
+    appKey: detectAppKey(),
+    points: loadPoints(detectAppKey()),
     recording: false,
     running: false,
     stopRequested: false,
@@ -131,6 +138,7 @@
   const recordButton = panel.querySelector('[data-action="record"]');
   const runButton = panel.querySelector('[data-action="run"]');
   const stopButton = panel.querySelector('[data-action="stop"]');
+  appEl.value = state.appKey;
   let markerNodes = [];
 
   function loadPoints(appKey = 'jcc') {
