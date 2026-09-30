@@ -42,7 +42,7 @@
         <button class="danger" data-action="stop">停止</button>
       </div>
       <div class="cgca-fields">
-        <label>间隔(ms)<input data-role="interval" type="number" min="30" step="10" value="3000"></label>
+        <label>间隔(ms)<input data-role="interval" type="number" min="30" step="10" value="10000"></label>
         <label>循环(0=无限)<input data-role="loops" type="number" min="0" step="1" value="0"></label>
       </div>
       <div class="cgca-row">
