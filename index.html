@@ -44,6 +44,26 @@
         background: #111c2a;
       }
 
+      .app-picker {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .app-picker label { font-size: 12px; }
+
+      .app-picker select {
+        min-height: 34px;
+        padding: 6px 30px 6px 9px;
+        border: 1px solid #49647e;
+        border-radius: 5px;
+        background: #22364c;
+        color: var(--text);
+        font: inherit;
+      }
+
       .title-group { min-width: 0; }
 
       h1 {
@@ -182,13 +202,20 @@
             <a href="edge://extensions/" target="_blank" rel="noopener noreferrer">Edge 扩展管理</a>
           </p>
         </div>
+        <div class="app-picker">
+          <label for="app-select">应用</label>
+          <select id="app-select" aria-label="选择应用">
+            <option value="jcc">金铲铲自动对战</option>
+            <option value="naruto">火影忍者</option>
+          </select>
+        </div>
       </header>
 
       <main>
         <section class="window-grid" aria-label="金铲铲自动对战">
           <article class="game-window" data-window="1">
             <div class="window-bar">
-              <div class="window-label"><span class="window-dot"></span><span>金铲铲自动对战</span><span class="window-state">加载中...</span></div>
+              <div class="window-label"><span class="window-dot"></span><span data-role="window-title">金铲铲自动对战</span><span class="window-state">加载中...</span></div>
             </div>
             <iframe title="金铲铲自动对战" loading="eager" allow="autoplay; fullscreen; clipboard-read; clipboard-write"></iframe>
           </article>
@@ -197,8 +224,20 @@
     </div>
 
     <script>
-      const GAME_URL = 'https://start.qq.com/game/arm-game/?ADTAG=10000000&extra=eyJob21lIjoiaHR0cHM6Ly9zdGFydC5xcS5jb20vd2ViZ2FtZS9wcmUtcGxheWluZy83MDA5Njc/ZnJvbVBhZ2U9Z2FtZV9kZXRhaWxfcGFnZSZBRFRBRz0xMDAwMDAwMCIsInN0YXJ0VmVyc2lvbiI6IjAuMTAuOTQwLjUwMDYwMDIiLCJ3ZWJjZ19jb21tb24iOjF9#/game/700967?time=1790047923464';
+      const APPS = {
+        jcc: {
+          name: '金铲铲自动对战',
+          url: 'https://start.qq.com/game/arm-game/?ADTAG=10000000&extra=eyJob21lIjoiaHR0cHM6Ly9zdGFydC5xcS5jb20vd2ViZ2FtZS9wcmUtcGxheWluZy83MDA5Njc/ZnJvbVBhZ2U9Z2FtZV9kZXRhaWxfcGFnZSZBRFRBRz0xMDAwMDAwMCIsInN0YXJ0VmVyc2lvbiI6IjAuMTAuOTQwLjUwMDYwMDIiLCJ3ZWJjZ19jb21tb24iOjF9#/game/700967?time=1790047923464',
+        },
+        naruto: {
+          name: '火影忍者',
+          url: 'https://start.qq.com/game/arm-game/?ADTAG=10000000&extra=eyJob21lIjoiaHR0cHM6Ly9zdGFydC5xcS5jb20vd2ViZ2FtZS9wcmUtcGxheWluZy83MDA3MjQ/ZnJvbVBhZ2U9Z2FtZV9kZXRhaWxfcGFnZSZBRFRBRz0xMDAwMDAwMCIsInN0YXJ0VmVyc2lvbiI6IjAuMTAuOTAwLjUwMDYwMDIiLCJ3ZWJjZ19jb21tb24iOjF9#/game/700724?time=1790742724938',
+        },
+      };
+      const appSelect = document.querySelector('#app-select');
+      const windowGrid = document.querySelector('.window-grid');
       const windows = [...document.querySelectorAll('.game-window')];
+      let currentApp = APPS[appSelect.value];
       const NETWORK_CHECK_INTERVAL = 15000;
       const NETWORK_PROBE_TIMEOUT = 8000;
       const LOAD_TIMEOUT = 60000;
@@ -219,11 +258,28 @@
 
       function createFrameUrl() {
         // 每次重连都添加唯一参数，确保浏览器真正重新创建跨域页面。
-        const url = new URL(GAME_URL);
+        const url = new URL(currentApp.url);
         url.searchParams.set('_reconnect', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
         return url.toString();
       }
 
+      function selectApp(appKey) {
+        const app = APPS[appKey];
+        if (!app || app === currentApp) return;
+        currentApp = app;
+        document.title = app.name;
+        document.querySelector('h1').textContent = app.name;
+        windowGrid.setAttribute('aria-label', app.name);
+        windows.forEach((gameWindow) => {
+          gameWindow.querySelector('[data-role="window-title"]').textContent = app.name;
+          gameWindow.querySelector('iframe').title = app.name;
+        });
+        recoveryAttempt = 0;
+        clearTimeout(recoveryTimer);
+        recoveryTimer = null;
+        loadFrame(windows[0], 'switch');
+        checkNetwork();
+      }
       function loadFrame(gameWindow, reason = 'initial') {
         const frame = gameWindow.querySelector('iframe');
         const state = gameWindow.querySelector('.window-state');
@@ -237,6 +293,7 @@
           if (frame.__loadToken === loadToken) scheduleRecovery('加载超时');
         }, LOAD_TIMEOUT);
       }
+
 
       function scheduleRecovery(reason) {
         if (!isNetworkAvailable || recoveryTimer) return;
@@ -260,7 +317,7 @@
       async function probeNetwork() {
         if (probeInFlight) return probeInFlight;
 
-        const probeUrl = `${new URL(GAME_URL).origin}/favicon.ico?_probe=${Date.now()}`;
+        const probeUrl = `${new URL(currentApp.url).origin}/favicon.ico?_probe=${Date.now()}`;
         probeInFlight = (async () => {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), NETWORK_PROBE_TIMEOUT);
@@ -313,6 +370,8 @@
         const available = navigator.onLine !== false && await probeNetwork();
         updateNetworkState(available, 'probe');
       }
+
+      appSelect.addEventListener('change', () => selectApp(appSelect.value));
 
       windows.forEach((gameWindow) => {
         const frame = gameWindow.querySelector('iframe');
