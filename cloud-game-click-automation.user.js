@@ -15,6 +15,7 @@
   const APP_CONFIGS = {
     jcc: {
       name: '金铲铲',
+      defaultInterval: 10000,
       defaultPoints: [
         { x: 0.8185719600340136, y: 0.8710210272606383, global: false },
         { x: 0.5320976828231293, y: 0.818842461768617, global: false },
@@ -27,9 +28,18 @@
     },
     naruto: {
       name: '火影忍者',
+      defaultInterval: 50,
       defaultPoints: [
-        { x: 0.9115090852010899, y: 0.8396610376440873, global: false, surfaceRatio: 1.7745762711864406 },
-        { x: 0.9107450089900405, y: 0.8369491628923659, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.8977554802210875, y: 0.24033899340084044, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.8962273277989886, y: 0.40711864407284787, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.8969914040100381, y: 0.59152545476869, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.7930754653348053, y: 0.6823728710160417, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.78085007107218, y: 0.8003389830558987, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.8633715260663597, y: 0.7596610169542037, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.860315221222162, y: 0.7569491422024824, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.6799904372411448, y: 0.826101715610189, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.8610792974332114, y: 0.7569491422024824, global: false, surfaceRatio: 1.7745762711864406 },
+        { x: 0.8610792974332114, y: 0.7569491422024824, global: false, surfaceRatio: 1.7745762711864406 },
       ],
     },
   };
@@ -137,6 +147,7 @@
   const appEl = panel.querySelector('[data-role="app"]');
   const listEl = panel.querySelector('[data-role="list"]');
   const intervalEl = panel.querySelector('[data-role="interval"]');
+  intervalEl.value = String(APP_CONFIGS[state.appKey].defaultInterval);
   const loopsEl = panel.querySelector('[data-role="loops"]');
   const recordButton = panel.querySelector('[data-action="record"]');
   const runButton = panel.querySelector('[data-action="run"]');
@@ -145,17 +156,8 @@
   let markerNodes = [];
 
   function loadPoints(appKey = 'jcc') {
-    const defaults = APP_CONFIGS[appKey].defaultPoints;
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved === null) return defaults.map((point) => ({ ...point }));
-      const value = JSON.parse(saved);
-      if (Array.isArray(value)) {
-        // 兼容旧版本的单应用坐标数据，并将其视为金铲铲配置。
-        return appKey === 'jcc' ? value : defaults.map((point) => ({ ...point }));
-      }
-      return Array.isArray(value[appKey]) ? value[appKey] : defaults.map((point) => ({ ...point }));
-    } catch (_) { return defaults.map((point) => ({ ...point })); }
+    // 每次脚本加载都从应用默认配置开始，不使用上一次保存的坐标覆盖默认值。
+    return APP_CONFIGS[appKey].defaultPoints.map((point) => ({ ...point }));
   }
 
   function savePoints() {
@@ -177,7 +179,7 @@
     state.appKey = appKey;
     state.points = loadPoints(appKey);
     appEl.value = appKey;
-    recordButton.textContent = '记录';
+    intervalEl.value = String(APP_CONFIGS[appKey].defaultInterval);
     state.recording = false;
     renderList();
     setStatus(`${APP_CONFIGS[appKey].name}已切换。`);
