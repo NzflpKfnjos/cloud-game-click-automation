@@ -295,6 +295,7 @@
           lastMetrics: null,
           lastSequence: 0,
           hasMonitor: false,
+          accountExpired: false,
         };
       }
 
@@ -510,6 +511,19 @@
           || !message
           || message.type !== DIAGNOSTIC_MESSAGE_TYPE) return;
 
+        if (message.event === 'account-expired' || (message.event === 'heartbeat' && message.accountExpired)) {
+          if (!health.accountExpired) addLog('error', '内嵌页面账号已过期', message);
+          health.accountExpired = true;
+          setState('账号已过期，请在内嵌页面重新登录');
+          return;
+        }
+        if (message.event === 'account-restored') {
+          health.accountExpired = false;
+          addLog('info', '内嵌页面账号状态已恢复');
+          setState('运行正常 · 监控已连接');
+          return;
+        }
+
         if (message.event !== 'heartbeat') {
           addLog(message.event.includes('error') ? 'error' : 'info', `内嵌页：${message.event}`, message);
           return;
@@ -521,6 +535,10 @@
         health.lastHeartbeatAt = now;
         health.lastSequence = Number(message.sequence || 0);
         const metrics = extractProgressMetrics(message.diagnostics);
+        if (health.accountExpired) {
+          health.accountExpired = false;
+          addLog('info', '内嵌页面账号状态已恢复');
+        }
         if (metricsAdvanced(health.lastMetrics, metrics)) health.lastProgressAt = now;
         if (!health.lastProgressAt) health.lastProgressAt = now;
         if (metrics) health.lastMetrics = metrics;
@@ -535,7 +553,7 @@
       }
 
       function runWatchdog() {
-        if (document.hidden || !isNetworkAvailable || recoveryTimer) return;
+        if (document.hidden || !isNetworkAvailable || recoveryTimer || health.accountExpired) return;
         const now = Date.now();
         const runningFor = now - health.loadedAt;
         if (runningFor < WATCHDOG_WARMUP) return;

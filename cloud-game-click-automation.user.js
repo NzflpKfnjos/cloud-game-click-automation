@@ -18,6 +18,7 @@
     heartbeatSequence: 0,
     lastLongTask: null,
     lastError: null,
+    accountExpired: false,
   };
 
   function reportDiagnostic(event, details = {}) {
@@ -85,6 +86,35 @@
     diagnosticState.lastError = { message: reason };
     reportDiagnostic('unhandled-rejection', { error: diagnosticState.lastError });
   });
+
+  function detectAccountExpired() {
+    const text = (document.body?.innerText || '').replace(/\\s+/g, ' ');
+    const matched = /(账号|账户|登录|登入).{0,24}(过期|失效|超时|重新登录|请登录)|(过期|失效).{0,24}(登录|账号|账户)/i.test(text);
+    if (matched && !diagnosticState.accountExpired) {
+      diagnosticState.accountExpired = true;
+      reportDiagnostic('account-expired', {
+        matchedText: text.slice(0, 500),
+        action: '需要在内嵌页面重新登录，不能通过网络重连解决',
+      });
+    } else if (!matched && diagnosticState.accountExpired) {
+      diagnosticState.accountExpired = false;
+      reportDiagnostic('account-restored');
+    }
+    return diagnosticState.accountExpired;
+  }
+
+  function installAccountExpiredMonitor() {
+    const check = () => detectAccountExpired();
+    if (document.body) {
+      check();
+      new MutationObserver(check).observe(document.body, { subtree: true, childList: true, characterData: true });
+    } else {
+      document.addEventListener('DOMContentLoaded', check, { once: true });
+    }
+    setInterval(check, 3000);
+  }
+
+  installAccountExpiredMonitor();
 
   if (typeof PerformanceObserver === 'function') {
     try {
@@ -155,6 +185,7 @@
       reportDiagnostic('heartbeat', {
         sequence: ++diagnosticState.heartbeatSequence,
         diagnostics,
+        accountExpired: detectAccountExpired(),
         lastLongTask: diagnosticState.lastLongTask,
         lastError: diagnosticState.lastError,
       });
