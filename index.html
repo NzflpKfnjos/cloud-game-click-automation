@@ -271,6 +271,7 @@
       const HEARTBEAT_TIMEOUT = 25000;
       const MEDIA_STALL_TIMEOUT = 45000;
       const MEDIA_READY_TIMEOUT = 30000;
+      const PERIODIC_RECONNECT_INTERVAL = 60000;
       const WATCHDOG_WARMUP = 90000;
 
       const appSelect = document.querySelector('#app-select');
@@ -281,6 +282,7 @@
       let isNetworkAvailable = navigator.onLine !== false;
       let offlineSince = isNetworkAvailable ? null : Date.now();
       let recoveryTimer = null;
+      let periodicReconnectTimer = null;
       let probeInFlight = null;
       let recoveryAttempt = 0;
       let recentAutomaticRecoveries = [];
@@ -631,6 +633,12 @@
         }
       }
 
+      function periodicReconnect() {
+        if (document.hidden || !isNetworkAvailable || recoveryTimer || health.accountExpired || !health.hasMonitor) return;
+        addLog('info', '定时保持连接', { interval: PERIODIC_RECONNECT_INTERVAL });
+        windows.forEach((gameWindow) => loadFrame(gameWindow, 'periodic'));
+      }
+
       function manualReconnect() {
         clearTimeout(recoveryTimer);
         recoveryTimer = null;
@@ -712,6 +720,7 @@
       addLog('info', '页面监控启动', { version: '1.5.0' });
       setInterval(checkNetwork, NETWORK_CHECK_INTERVAL);
       setInterval(runWatchdog, 10000);
+      periodicReconnectTimer = setInterval(periodicReconnect, PERIODIC_RECONNECT_INTERVAL);
       checkNetwork();
     </script>
   </body>
