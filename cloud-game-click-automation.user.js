@@ -308,7 +308,7 @@
 
   const style = document.createElement('style');
   style.textContent = `
-    #cgca-panel { position:fixed; z-index:2147483647; top:58px; right:14px; width:292px; color:#eaf0f8;
+    #cgca-panel { position:fixed; z-index:2147483647; top:14px; left:14px; width:168px; color:#eaf0f8;
       font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#18202b;
       border:1px solid #53657a; border-radius:8px; box-shadow:0 8px 30px #0008; user-select:none; }
     #cgca-panel * { box-sizing:border-box; }
@@ -341,6 +341,7 @@
     #cgca-panel .cgca-help { margin-top:8px; color:#8194aa; font-size:11px; }
     #cgca-panel.cgca-collapsed { width:168px; }
     #cgca-panel.cgca-collapsed .cgca-body { display:none; }
+    #cgca-panel.cgca-collapsed [data-role="app-name"] { display:none; }
     #cgca-markers { position:fixed; inset:0; z-index:2147483646; pointer-events:none; overflow:hidden; }
     #cgca-markers .cgca-marker { position:fixed; width:26px; height:26px; transform:translate(-50%,-50%); border:2px solid #43d9ff;
       border-radius:50%; background:#087a9caa; box-shadow:0 0 0 2px #06253299, 0 0 12px #43d9ff; color:#fff; font:bold 12px/22px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
@@ -356,6 +357,7 @@
   const markerLayer = document.createElement('div');
   markerLayer.id = 'cgca-markers';
   document.documentElement.append(style, markerLayer, panel);
+  panel.classList.add('cgca-collapsed');
 
   const statusEl = panel.querySelector('[data-role="status"]');
   const appNameEl = panel.querySelector('[data-role="app-name"]');
