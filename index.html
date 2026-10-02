@@ -270,6 +270,7 @@
       const MAX_RETRY_DELAY = 60000;
       const HEARTBEAT_TIMEOUT = 25000;
       const MEDIA_STALL_TIMEOUT = 45000;
+      const MEDIA_READY_TIMEOUT = 30000;
       const WATCHDOG_WARMUP = 90000;
 
       const appSelect = document.querySelector('#app-select');
@@ -293,6 +294,8 @@
           lastHeartbeatAt: 0,
           lastProgressAt: 0,
           lastMetrics: null,
+          mediaReady: false,
+          progressSamples: 0,
           lastSequence: 0,
           hasMonitor: false,
           accountExpired: false,
@@ -377,7 +380,9 @@
         const state = gameWindow.querySelector('.window-state');
         const loadToken = Symbol('frame-load');
         frame.__loadToken = loadToken;
+        frame.__loadReason = reason;
         clearTimeout(frame.__loadTimer);
+        clearTimeout(frame.__mediaValidationTimer);
         resetHealth();
         state.textContent = reason === 'initial' ? '加载中...' : '正在重新连接...';
         addLog('info', '重建嵌套页面', { reason, attempt: recoveryAttempt });
@@ -503,6 +508,31 @@
           || current.totalVideoFrames > previous.totalVideoFrames;
       }
 
+      function metricsHaveData(metrics) {
+        if (!metrics) return false;
+        if (metrics.source === 'webrtc') {
+          return metrics.bytesReceived > 0
+            || metrics.packetsReceived > 0
+            || metrics.framesDecoded > 0;
+        }
+        return metrics.currentTime > 0 || metrics.totalVideoFrames > 0;
+      }
+
+      function armMediaValidation(frame, loadToken, timeout) {
+        clearTimeout(frame.__mediaValidationTimer);
+        frame.__mediaValidationTimer = setTimeout(() => {
+          if (frame.__loadToken !== loadToken || recoveryTimer || health.accountExpired) return;
+          if (!health.mediaReady || health.progressSamples < 2) {
+            scheduleRecovery('重连后未恢复媒体流', {
+              hasMonitor: health.hasMonitor,
+              mediaReady: health.mediaReady,
+              progressSamples: health.progressSamples,
+              lastMetrics: health.lastMetrics,
+            });
+          }
+        }, timeout);
+      }
+
       function handleDiagnosticMessage(event) {
         const frame = windows[0].querySelector('iframe');
         const message = event.data;
@@ -526,6 +556,15 @@
 
         if (message.event !== 'heartbeat') {
           addLog(message.event.includes('error') ? 'error' : 'info', `内嵌页：${message.event}`, message);
+          if (message.event === 'peer-connection-state'
+            && message.connectionState === 'failed'
+            && !document.hidden
+            && !health.accountExpired) {
+            scheduleRecovery('WebRTC 连接失败', {
+              connectionState: message.connectionState,
+              iceConnectionState: message.iceConnectionState,
+            });
+          }
           return;
         }
 
@@ -539,9 +578,15 @@
           health.accountExpired = false;
           addLog('info', '内嵌页面账号状态已恢复');
         }
-        if (metricsAdvanced(health.lastMetrics, metrics)) health.lastProgressAt = now;
+        if (metricsAdvanced(health.lastMetrics, metrics)) {
+          health.lastProgressAt = now;
+          health.progressSamples += 1;
+        }
         if (!health.lastProgressAt) health.lastProgressAt = now;
-        if (metrics) health.lastMetrics = metrics;
+        if (metrics) {
+          health.lastMetrics = metrics;
+          if (metricsHaveData(metrics)) health.mediaReady = true;
+        }
 
         if (firstHeartbeat) {
           setState('运行正常 · 监控已连接');
@@ -562,7 +607,7 @@
           if (!monitorMissingLogged) {
             monitorMissingLogged = true;
             addLog('warn', '未收到内嵌页监控心跳', {
-              action: '请确认 Tampermonkey 脚本已更新到 1.4.0，并允许在 iframe 中运行',
+              action: '请确认 Tampermonkey 脚本已更新到 1.5.0，并允许在 iframe 中运行',
             });
           }
           return;
@@ -631,6 +676,11 @@
           health.loadedAt = Date.now();
           gameWindow.querySelector('.window-state').textContent = '已加载 · 等待画面监控';
           addLog('info', '内嵌页面 load 事件完成');
+          armMediaValidation(
+            frame,
+            frame.__loadToken,
+            frame.__loadReason === 'initial' ? LOAD_TIMEOUT : MEDIA_READY_TIMEOUT,
+          );
         });
         frame.addEventListener('error', () => {
           addLog('error', '内嵌页面加载失败');
@@ -659,7 +709,7 @@
       });
 
       renderLogs();
-      addLog('info', '页面监控启动', { version: '1.4.0' });
+      addLog('info', '页面监控启动', { version: '1.5.0' });
       setInterval(checkNetwork, NETWORK_CHECK_INTERVAL);
       setInterval(runWatchdog, 10000);
       checkNetwork();

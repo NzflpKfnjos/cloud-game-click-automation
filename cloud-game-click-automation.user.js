@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         云游戏点击脚本助手
 // @namespace    local.cloud-game-clicker
-// @version      1.4.0
+// @version      1.5.0
 // @description  记录并按顺序重放云游戏画布上的点击位置，并上报画面/连接诊断信息
 // @match        https://start.qq.com/game/arm-game/*
 // @run-at       document-start
@@ -12,6 +12,7 @@
   'use strict';
 
   const STORAGE_KEY = 'cloud-game-click-automation-v1';
+  const RUN_STATE_KEY = 'cloud-game-click-run-v1';
   const DIAGNOSTIC_MESSAGE_TYPE = 'cgca-diagnostic-v1';
   const trackedPeerConnections = new Set();
   const diagnosticState = {
@@ -233,33 +234,59 @@
     },
   };
   function detectAppKey() {
-    const url = window.location.href;
-    if (url.includes('/game/700724')) return 'naruto';
-    if (url.includes('/game/700967')) return 'jcc';
+    const route = `${window.location.pathname}${window.location.hash}`;
+    if (/\/game\/700724(?:[/?#]|$)/.test(route)) return 'naruto';
+    if (/\/game\/700967(?:[/?#]|$)/.test(route)) return 'jcc';
     return 'jcc';
   }
 
+  const initialAppKey = detectAppKey();
   const state = {
-    appKey: detectAppKey(),
-    points: loadPoints(detectAppKey()),
+    appKey: initialAppKey,
+    points: loadPoints(initialAppKey),
     recording: false,
     running: false,
     stopRequested: false,
     loop: 0,
   };
 
+  function loadRunIntent() {
+    try {
+      const value = JSON.parse(sessionStorage.getItem(RUN_STATE_KEY) || 'null');
+      if (!value || typeof value !== 'object') return null;
+      if (value.appKey !== state.appKey || value.running !== true) return null;
+      return {
+        interval: Math.max(30, Number.parseInt(value.interval, 10) || 500),
+        loops: Math.max(0, Number.parseInt(value.loops, 10) || 0),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function saveRunIntent(interval, loops) {
+    try {
+      sessionStorage.setItem(RUN_STATE_KEY, JSON.stringify({
+        appKey: state.appKey,
+        running: true,
+        interval,
+        loops,
+      }));
+    } catch (_) { /* 存储不可用时不影响点击运行。 */ }
+  }
+
+  function clearRunIntent() {
+    try { sessionStorage.removeItem(RUN_STATE_KEY); } catch (_) { /* 忽略存储异常。 */ }
+  }
+
   const panel = document.createElement('div');
   panel.id = 'cgca-panel';
   panel.innerHTML = `
     <div class="cgca-head">
-      <strong>云游戏点击助手</strong>
+      <strong>云游戏点击助手 · <span data-role="app-name"></span></strong>
       <button data-action="minimize" title="折叠面板">−</button>
     </div>
     <div class="cgca-body">
-      <label class="cgca-app-picker">应用<select data-role="app">
-        <option value="jcc">金铲铲</option>
-        <option value="naruto">火影忍者</option>
-      </select></label>
       <div class="cgca-status" data-role="status">就绪。先点击“记录”，再点击游戏画面。</div>
       <div class="cgca-row">
         <button class="primary" data-action="record">记录</button>
@@ -306,8 +333,6 @@
     @keyframes cgca-pulse { 50% { box-shadow:inset 0 0 0 1px #ffc45c66; } }
     @keyframes cgca-blink { 50% { opacity:.25; } }
     #cgca-panel .cgca-fields { display:flex; gap:7px; margin-top:8px; }
-    #cgca-panel .cgca-app-picker { display:block; margin-bottom:8px; color:#aabbd0; font-size:12px; }
-    #cgca-panel .cgca-app-picker select { display:block; width:100%; margin-top:3px; padding:5px 6px; color:#edf3fa; background:#0f1721; border:1px solid #53657a; border-radius:4px; font:inherit; }
     #cgca-panel label { flex:1; color:#aabbd0; font-size:12px; }
     #cgca-panel input { display:block; width:100%; margin-top:3px; padding:5px 6px; color:#edf3fa; background:#0f1721; border:1px solid #53657a; border-radius:4px; }
     #cgca-panel ol { max-height:160px; margin:9px 0 0; padding:0 0 0 24px; overflow:auto; }
@@ -333,7 +358,7 @@
   document.documentElement.append(style, markerLayer, panel);
 
   const statusEl = panel.querySelector('[data-role="status"]');
-  const appEl = panel.querySelector('[data-role="app"]');
+  const appNameEl = panel.querySelector('[data-role="app-name"]');
   const listEl = panel.querySelector('[data-role="list"]');
   const intervalEl = panel.querySelector('[data-role="interval"]');
   intervalEl.value = String(APP_CONFIGS[state.appKey].defaultInterval);
@@ -341,8 +366,11 @@
   const recordButton = panel.querySelector('[data-action="record"]');
   const runButton = panel.querySelector('[data-action="run"]');
   const stopButton = panel.querySelector('[data-action="stop"]');
-  appEl.value = state.appKey;
   let markerNodes = [];
+
+  function updateAppLabel() {
+    appNameEl.textContent = APP_CONFIGS[state.appKey].name;
+  }
 
   function loadPoints(appKey = 'jcc') {
     // 每次脚本加载都从应用默认配置开始，不使用上一次保存的坐标覆盖默认值。
@@ -361,17 +389,18 @@
 
   function setStatus(text) { statusEl.textContent = text; }
 
-  function switchApp(appKey) {
+  function syncAppFromUrl() {
+    const appKey = detectAppKey();
     if (!APP_CONFIGS[appKey] || appKey === state.appKey) return;
     if (state.running) stop();
+    clearRunIntent();
     savePoints();
     state.appKey = appKey;
     state.points = loadPoints(appKey);
-    appEl.value = appKey;
     intervalEl.value = String(APP_CONFIGS[appKey].defaultInterval);
     state.recording = false;
     renderList();
-    setStatus(`${APP_CONFIGS[appKey].name}已切换。`);
+    setStatus(`已根据网页切换到${APP_CONFIGS[appKey].name}。`);
   }
 
 
@@ -508,6 +537,15 @@
     });
   }
 
+  async function waitForSurface(timeout = 15000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (getSurface()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return Boolean(getSurface());
+  }
+
   async function run() {
     if (state.running || !state.points.length) {
       if (!state.points.length) setStatus('还没有坐标，请先点击“记录”。');
@@ -517,6 +555,7 @@
     state.stopRequested = false;
     state.loop = Math.max(0, Number.parseInt(loopsEl.value, 10) || 0);
     const interval = Math.max(30, Number.parseInt(intervalEl.value, 10) || 500);
+    saveRunIntent(interval, state.loop);
     const points = state.points.map((point) => ({ ...point }));
     let completed = 0;
     updateRunningUI();
@@ -538,6 +577,7 @@
       const wasStopped = state.stopRequested;
       state.running = false;
       state.stopRequested = false;
+      clearRunIntent();
       setActiveMarker(-1);
       updateRunningUI();
       setStatus(wasStopped ? `已停止 · 已完成 ${completed} 轮` : `运行完成 · 共 ${completed} 轮`);
@@ -545,8 +585,12 @@
   }
 
   function stop() {
-    if (!state.running) return;
+    if (!state.running) {
+      clearRunIntent();
+      return;
+    }
     state.stopRequested = true;
+    clearRunIntent();
     setStatus('正在停止…');
   }
 
@@ -557,8 +601,6 @@
     renderList();
     setStatus(`已记录第 ${state.points.length} 个坐标，继续点击可继续记录。`);
   }, true);
-
-  appEl.addEventListener('change', () => switchApp(appEl.value));
 
   panel.addEventListener('click', (event) => {
     const action = event.target.closest('[data-action]')?.dataset.action;
@@ -619,6 +661,23 @@
 
     updateRunningUI();
     renderList();
+    updateAppLabel();
+    window.addEventListener('hashchange', syncAppFromUrl);
+    window.addEventListener('popstate', syncAppFromUrl);
+    setInterval(syncAppFromUrl, 2000);
+
+    const runIntent = loadRunIntent();
+    if (runIntent) {
+      intervalEl.value = String(runIntent.interval);
+      loopsEl.value = String(runIntent.loops);
+      setStatus('连接恢复后准备继续运行…');
+      setTimeout(async () => {
+        if (!loadRunIntent() || state.running) return;
+        if (await waitForSurface() && loadRunIntent()) run();
+      }, 1000);
+    } else {
+      clearRunIntent();
+    }
   }
 
   if (document.readyState === 'loading') {
