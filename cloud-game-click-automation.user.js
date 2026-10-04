@@ -205,7 +205,7 @@
     const APP_CONFIGS = {
     jcc: {
       name: '金铲铲',
-      defaultInterval: 10000,
+      defaultInterval: 100,
       defaultPoints: [
         { x: 0.8185719600340136, y: 0.8710210272606383, global: false },
         { x: 0.5320976828231293, y: 0.818842461768617, global: false },
@@ -295,7 +295,7 @@
         <button class="danger" data-action="stop">停止</button>
       </div>
       <div class="cgca-fields">
-        <label>间隔(ms)<input data-role="interval" type="number" min="30" step="10" value="10000"></label>
+        <label>间隔(ms)<input data-role="interval" type="number" min="30" step="10" value="${APP_CONFIGS[state.appKey].defaultInterval}"></label>
         <label>循环(0=无限)<input data-role="loops" type="number" min="0" step="1" value="0"></label>
       </div>
       <div class="cgca-row">
