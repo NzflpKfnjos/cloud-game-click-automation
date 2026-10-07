@@ -241,7 +241,7 @@
         },
       };
 
-      const PERIODIC_RECONNECT_INTERVAL = 60000;
+      const PERIODIC_RECONNECT_INTERVAL = 20000;
       const appSelect = document.querySelector('#app-select');
       const windowGrid = document.querySelector('.window-grid');
       const windows = [...document.querySelectorAll('.game-window')];
@@ -297,7 +297,7 @@
       windows.forEach((gameWindow) => {
         const frame = gameWindow.querySelector('iframe');
         frame.addEventListener('load', () => {
-          gameWindow.querySelector('.window-state').textContent = '已加载 · 每 60 秒重新连接';
+          gameWindow.querySelector('.window-state').textContent = '已加载 · 每 20 秒重新连接';
         });
         loadFrame(gameWindow);
       });
