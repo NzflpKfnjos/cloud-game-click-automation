@@ -241,12 +241,10 @@
         },
       };
 
-      const PERIODIC_RECONNECT_INTERVAL = 20000;
       const appSelect = document.querySelector('#app-select');
       const windowGrid = document.querySelector('.window-grid');
       const windows = [...document.querySelectorAll('.game-window')];
       let currentApp = APPS[appSelect.value];
-      let reconnectTimer = null;
 
       function createFrameUrl() {
         const url = new URL(currentApp.url);
@@ -266,11 +264,6 @@
         windows.forEach((gameWindow) => loadFrame(gameWindow, 'reconnect'));
       }
 
-      function startReconnectTimer() {
-        clearInterval(reconnectTimer);
-        reconnectTimer = setInterval(reconnect, PERIODIC_RECONNECT_INTERVAL);
-      }
-
       function selectApp(appKey) {
         const app = APPS[appKey];
         if (!app || app === currentApp) return;
@@ -283,12 +276,10 @@
           gameWindow.querySelector('iframe').title = app.name;
           loadFrame(gameWindow);
         });
-        startReconnectTimer();
       }
 
       function manualReconnect() {
         reconnect();
-        startReconnectTimer();
       }
 
       appSelect.addEventListener('change', () => selectApp(appSelect.value));
@@ -297,11 +288,10 @@
       windows.forEach((gameWindow) => {
         const frame = gameWindow.querySelector('iframe');
         frame.addEventListener('load', () => {
-          gameWindow.querySelector('.window-state').textContent = '已加载 · 每 20 秒重新连接';
+          gameWindow.querySelector('.window-state').textContent = '已加载';
         });
         loadFrame(gameWindow);
       });
-      startReconnectTimer();
     </script>
   </body>
 </html>

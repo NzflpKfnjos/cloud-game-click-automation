@@ -130,41 +130,27 @@ function reconnectToken(load) {
   return new URL(load.url).searchParams.get('_reconnect');
 }
 
-test('initial load selects the correct game and waits exactly 20 seconds to reconnect', () => {
+test('initial load selects the correct game without scheduling automatic reconnects', () => {
   const page = createPage();
   assert.equal(page.loads.length, 1);
   assert.equal(new URL(page.frame.src).origin, 'https://start.qq.com');
   assert.match(new URL(page.frame.src).hash, /^#\/game\/700967\?/);
   assert.ok(reconnectToken(page.loads[0]));
   assert.equal(page.state.textContent, '加载中...');
-  assert.equal(page.clock.timers.size, 1);
+  assert.equal(page.clock.timers.size, 0);
 
   page.frame.dispatch('load');
-  assert.equal(page.state.textContent, '已加载 · 每 20 秒重新连接');
+  assert.equal(page.state.textContent, '已加载');
+  page.clock.advance(60000);
   assert.equal(page.loads.length, 1);
-  page.clock.advance(19999);
-  assert.equal(page.loads.length, 1);
-  page.clock.advance(1);
-  assert.equal(page.loads.length, 2);
-  assert.equal(page.loads[1].at, 20000);
-  assert.notEqual(reconnectToken(page.loads[0]), reconnectToken(page.loads[1]));
-  assert.equal(page.state.textContent, '正在重新连接...');
+  assert.equal(page.clock.timers.size, 0);
 });
 
-test('long-running pages reconnect every 20 seconds with a fresh URL every time', () => {
-  const page = createPage();
-  page.clock.advance(60 * 20000);
-  assert.equal(page.loads.length, 61);
-  assert.deepEqual(page.loads.map(({ at }) => at), Array.from({ length: 61 }, (_, i) => i * 20000));
-  assert.equal(new Set(page.loads.map(reconnectToken)).size, 61);
-  assert.equal(page.clock.timers.size, 1);
-});
-
-test('missing heartbeats, hidden state, and offline state do not pause scheduled reconnection', () => {
+test('hidden and offline pages do not refresh automatically', () => {
   const page = createPage({ hidden: true, online: false });
   page.clock.advance(60000);
-  assert.deepEqual(page.loads.map(({ at }) => at), [0, 20000, 40000, 60000]);
-  assert.equal(page.clock.timers.size, 1);
+  assert.deepEqual(page.loads.map(({ at }) => at), [0]);
+  assert.equal(page.clock.timers.size, 0);
   assert.equal(page.networkRequests.length, 0);
 });
 
@@ -187,36 +173,25 @@ test('errors, network events, and diagnostic messages never add extra reloads', 
       data: { type: 'cgca-diagnostic-v1', event, connectionState: 'failed', diagnostics: {} },
     });
   }
-  page.clock.advance(9999);
+  page.clock.advance(60000);
   assert.equal(page.loads.length, 1);
   assert.equal(page.networkRequests.length, 0);
-  assert.equal(page.clock.timers.size, 1);
-  page.clock.advance(1);
-  assert.equal(page.loads.length, 2);
-  assert.equal(page.loads[1].at, 20000);
+  assert.equal(page.clock.timers.size, 0);
 });
 
-test('manual reconnect reloads immediately and resets a single countdown', () => {
+test('manual reconnect reloads immediately without scheduling a countdown', () => {
   const page = createPage();
-  page.clock.advance(19000);
+  page.clock.advance(60000);
   page.reconnectButton.dispatch('click');
   page.reconnectButton.dispatch('click');
-  assert.deepEqual(page.loads.map(({ at }) => at), [0, 19000, 19000]);
+  assert.deepEqual(page.loads.map(({ at }) => at), [0, 60000, 60000]);
   assert.equal(new Set(page.loads.map(reconnectToken)).size, 3);
-  assert.equal(page.clock.timers.size, 1);
-  page.clock.advance(1000);
-  assert.equal(page.loads.length, 3, 'the original countdown must be cancelled');
-  page.clock.advance(18999);
-  assert.equal(page.loads.length, 3);
-  page.clock.advance(1);
-  assert.equal(page.loads.length, 4);
-  assert.equal(page.loads[3].at, 39000);
-  assert.equal(page.clock.timers.size, 1);
+  assert.equal(page.clock.timers.size, 0);
 });
 
-test('switching games updates the game hash and titles and resets one countdown', () => {
+test('switching games updates the game hash and titles without scheduling a countdown', () => {
   const page = createPage();
-  page.clock.advance(19000);
+  page.clock.advance(60000);
   page.appSelect.value = 'naruto';
   page.appSelect.dispatch('change');
   assert.equal(page.loads.length, 2);
@@ -226,25 +201,16 @@ test('switching games updates the game hash and titles and resets one countdown'
   assert.equal(page.windowTitle.textContent, '火影忍者');
   assert.equal(page.frame.title, '火影忍者');
   assert.equal(page.windowGrid.getAttribute('aria-label'), '火影忍者');
-  assert.equal(page.clock.timers.size, 1);
-  page.clock.advance(19999);
-  assert.equal(page.loads.length, 2, 'switching must cancel the prior countdown');
-  page.clock.advance(1);
-  assert.equal(page.loads.length, 3);
-  assert.equal(page.loads[2].at, 39000);
-  assert.match(new URL(page.frame.src).hash, /^#\/game\/700724\?/);
+  assert.equal(page.clock.timers.size, 0);
 
   page.appSelect.value = 'jcc';
   page.appSelect.dispatch('change');
-  assert.equal(page.loads.length, 4);
+  assert.equal(page.loads.length, 3);
   assert.match(new URL(page.frame.src).hash, /^#\/game\/700967\?/);
   assert.equal(page.document.title, '金铲铲自动对战');
   assert.equal(page.heading.textContent, '金铲铲自动对战');
   assert.equal(page.windowTitle.textContent, '金铲铲自动对战');
   assert.equal(page.frame.title, '金铲铲自动对战');
   assert.equal(page.windowGrid.getAttribute('aria-label'), '金铲铲自动对战');
-  assert.equal(page.clock.timers.size, 1);
-  page.clock.advance(20000);
-  assert.equal(page.loads.length, 5);
-  assert.equal(page.loads[4].at, 59000);
+  assert.equal(page.clock.timers.size, 0);
 });
