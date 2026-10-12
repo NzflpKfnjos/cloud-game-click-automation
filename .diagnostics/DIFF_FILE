@@ -1,17 +1,10 @@
---- .diagnostics/index.html.baseline	2026-10-12 10:42:40
-+++ .diagnostics/MODIFIED_FILE	2026-10-12 10:47:28
-@@ -206,6 +206,7 @@
-           </p>
-         </div>
-         <div class="app-picker">
+--- a/index.html
++++ b/index.html
+@@ -208,0 +209,3 @@
++          <button type="button" data-action="toggle-diagnostics">开始记录日志</button>
++          <span data-role="diagnostic-status" aria-live="polite">日志未记录</span>
 +          <button type="button" data-action="export-diagnostics">导出诊断日志</button>
-           <label for="app-select">应用</label>
-           <select id="app-select" aria-label="选择应用">
-             <option value="jcc">金铲铲自动对战</option>
-@@ -246,6 +247,50 @@
-       const windows = [...document.querySelectorAll('.game-window')];
-       let currentApp = APPS[appSelect.value];
- 
+@@ -248,0 +252,65 @@
 +      // 持久化诊断日志：刷新后仍保留，用于分析长时间运行后的卡顿。
 +      const DIAGNOSTIC_KEY = 'cloud-game-click-diagnostics-v1';
 +      const DIAGNOSTIC_LIMIT = 2000;
@@ -27,8 +20,29 @@
 +          return Array.isArray(value) ? value : [];
 +        } catch (_) { return []; }
 +      }
++      const DIAGNOSTIC_ENABLED_KEY = 'cloud-game-click-diagnostics-enabled-v1';
++      let diagnosticsEnabled = false;
++      try { diagnosticsEnabled = localStorage.getItem(DIAGNOSTIC_ENABLED_KEY) === 'true'; } catch (_) {}
++      function syncDiagnosticsToFrames() {
++        windows.forEach((item) => item.querySelector('iframe').contentWindow?.postMessage?.({ type: 'cgca-diagnostic-control-v1', recording: diagnosticsEnabled }, 'https://start.qq.com'));
++      }
++      function updateDiagnosticControls() {
++        const button = document.querySelector('[data-action="toggle-diagnostics"]');
++        const status = document.querySelector('[data-role="diagnostic-status"]');
++        if (button) button.textContent = diagnosticsEnabled ? '停止记录日志' : '开始记录日志';
++        if (status) { status.textContent = diagnosticsEnabled ? '● 日志记录中' : '日志未记录'; status.setAttribute('style', diagnosticsEnabled ? 'color:#7cf0a0' : 'color:#91a6bc'); }
++      }
++      function setDiagnosticsEnabled(enabled) {
++        if (diagnosticsEnabled && !enabled) logDiagnostic('recording-stopped');
++        diagnosticsEnabled = enabled;
++        try { localStorage.setItem(DIAGNOSTIC_ENABLED_KEY, String(enabled)); } catch (_) {}
++        if (enabled) logDiagnostic('recording-started');
++        updateDiagnosticControls();
++        syncDiagnosticsToFrames();
++      }
 +      const diagnosticCounters = Object.create(null);
 +      function logDiagnostic(event, data = {}) {
++        if (!diagnosticsEnabled) return null;
 +        diagnosticCounters[event] = (diagnosticCounters[event] || 0) + 1;
 +        if (event === 'iframe-message' && data.event === 'heartbeat' && diagnosticCounters[event] % 60 !== 1) return null;
 +        const entry = { ts: new Date().toISOString(), mono: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
@@ -56,33 +70,17 @@
 +      window.__CGCA_DIAGNOSTICS = { log: logDiagnostic, read: readDiagnostics, export: exportDiagnostics };
 +      logDiagnostic('page-start', { href: window.location?.href || null, visibility: document.visibilityState, online: navigator.onLine });
 +
-       function createFrameUrl() {
-         const url = new URL(currentApp.url);
-         url.searchParams.set('_reconnect', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
-@@ -254,6 +299,7 @@
- 
-       function loadFrame(gameWindow, reason = 'initial') {
-         const frame = gameWindow.querySelector('iframe');
+@@ -256,0 +325 @@
 +        logDiagnostic('iframe-load-request', { reason, previousSrc: frame.src || null });
-         gameWindow.querySelector('.window-state').textContent = reason === 'initial'
-           ? '加载中...'
-           : '正在重新连接...';
-@@ -261,6 +307,7 @@
-       }
- 
-       function reconnect() {
+@@ -263,0 +333 @@
 +        logDiagnostic('manual-reconnect', { windows: windows.length });
-         windows.forEach((gameWindow) => loadFrame(gameWindow, 'reconnect'));
-       }
- 
-@@ -282,14 +329,42 @@
-         reconnect();
-       }
- 
+@@ -285 +355 @@
 -      appSelect.addEventListener('change', () => selectApp(appSelect.value));
 +      appSelect.addEventListener('change', () => { logDiagnostic('app-change', { appKey: appSelect.value }); selectApp(appSelect.value); });
-       document.querySelector('[data-action="reconnect"]').addEventListener('click', manualReconnect);
+@@ -286,0 +357,33 @@
 +      document.querySelector('[data-action="export-diagnostics"]')?.addEventListener('click', exportDiagnostics);
++      document.querySelector('[data-action="toggle-diagnostics"]')?.addEventListener('click', () => setDiagnosticsEnabled(!diagnosticsEnabled));
++      updateDiagnosticControls();
 +      window.addEventListener('error', (event) => logDiagnostic('window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
 +      window.addEventListener('unhandledrejection', (event) => logDiagnostic('unhandled-rejection', { reason: event.reason }));
 +      window.addEventListener('offline', () => logDiagnostic('network-offline'));
@@ -91,8 +89,13 @@
 +      window.addEventListener('pagehide', () => logDiagnostic('page-hide'));
 +      window.addEventListener('pageshow', (event) => logDiagnostic('page-show', { persisted: event.persisted }));
 +      window.addEventListener('message', (event) => {
-+        if (event.origin !== 'https://start.qq.com') return;
-+        logDiagnostic('iframe-message', { origin: event.origin, type: event.data?.type || null, event: event.data?.event || null, connectionState: event.data?.connectionState || null });
++        if (event.origin !== 'https://start.qq.com' || !windows.some((item) => item.querySelector('iframe').contentWindow === event.source)) return;
++        if (event.data?.type === 'cgca-diagnostic-status-v1') {
++          if (typeof event.data.recording === 'boolean' && diagnosticsEnabled !== event.data.recording) { diagnosticsEnabled = event.data.recording; try { localStorage.setItem(DIAGNOSTIC_ENABLED_KEY, String(diagnosticsEnabled)); } catch (_) {} updateDiagnosticControls(); }
++          return;
++        }
++        if (event.data?.type !== 'cgca-diagnostic-v1') return;
++        logDiagnostic('iframe-message', { origin: event.origin, type: event.data?.type || null, event: event.data?.event || null, connectionState: event.data?.connectionState || null, diagnostics: event.data?.diagnostics || null });
 +      });
 +      if (typeof PerformanceObserver !== 'undefined') {
 +        try {
@@ -108,23 +111,17 @@
 +          logDiagnostic('watchdog', { delayMs: Math.max(0, delay), visibility: document.visibilityState, online: navigator.onLine, iframeSrc: windows[0]?.querySelector('iframe')?.src || null });
 +        }, 10000);
 +      }
- 
-       windows.forEach((gameWindow) => {
-         const frame = gameWindow.querySelector('iframe');
-         frame.addEventListener('load', () => {
-           gameWindow.querySelector('.window-state').textContent = '已加载';
+@@ -291,0 +395,2 @@
 +          logDiagnostic('iframe-load', { src: frame.src || null });
-         });
++          syncDiagnosticsToFrames();
+@@ -292,0 +398 @@
 +        frame.addEventListener('error', (event) => logDiagnostic('iframe-error', { src: frame.src || null, error: event.error || null }));
-         loadFrame(gameWindow);
-       });
-     </script>
---- .diagnostics/cloud-game-click-automation.user.js.baseline	2026-10-12 10:42:40
-+++ .diagnostics/MODIFIED_FILE.user.js	2026-10-12 10:47:28
-@@ -13,8 +13,53 @@
- 
-   const STORAGE_KEY = 'cloud-game-click-automation-v1';
-   const RUN_STATE_KEY = 'cloud-game-click-run-v1';
+--- a/cloud-game-click-automation.user.js
++++ b/cloud-game-click-automation.user.js
+@@ -4 +4 @@
+-// @version      1.6.0
++// @version      1.6.1
+@@ -15,0 +16,64 @@
 +  const DIAGNOSTIC_KEY = 'cloud-game-click-diagnostics-v1';
 +  const DIAGNOSTIC_LIMIT = 3000;
 +  const diagnosticSession = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -139,13 +136,33 @@
 +      return Array.isArray(value) ? value : [];
 +    } catch (_) { return []; }
 +  }
++  let diagnosticAppKey = null;
++  const DIAGNOSTIC_ENABLED_KEY = 'cloud-game-click-diagnostics-enabled-v1';
++  let diagnosticsEnabled = false;
++  try { diagnosticsEnabled = localStorage.getItem(DIAGNOSTIC_ENABLED_KEY) === 'true'; } catch (_) {}
++  let diagnosticControls = null;
++  function setDiagnosticsEnabled(enabled) {
++    if (diagnosticsEnabled && !enabled) logDiagnostic('recording-stopped');
++    diagnosticsEnabled = enabled;
++    try { localStorage.setItem(DIAGNOSTIC_ENABLED_KEY, String(enabled)); } catch (_) {}
++    if (enabled) logDiagnostic('recording-started');
++    updateDiagnosticControls();
++  }
++  function updateDiagnosticControls() {
++    if (!diagnosticControls) return;
++    diagnosticControls.button.textContent = diagnosticsEnabled ? '停止日志' : '开始日志';
++    diagnosticControls.status.textContent = diagnosticsEnabled ? '● 日志记录中' : '日志未记录';
++    diagnosticControls.status.style.color = diagnosticsEnabled ? '#7cf0a0' : '#aabbd0';
++    try { if (window.parent !== window) window.parent.postMessage({ type: 'cgca-diagnostic-status-v1', recording: diagnosticsEnabled }, '*'); } catch (_) {}
++  }
 +  const diagnosticCounters = Object.create(null);
 +  function logDiagnostic(event, data = {}) {
++    if (!diagnosticsEnabled) return null;
 +    diagnosticCounters[event] = (diagnosticCounters[event] || 0) + 1;
 +    if ((event === 'click-emitted' || event === 'run-step') && diagnosticCounters[event] % 100 !== 1) return null;
 +    if (event === 'status' && diagnosticCounters[event] % 20 !== 1) return null;
 +    const entry = { ts: new Date().toISOString(), mono: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
-+      session: diagnosticSession, appKey: state?.appKey || null, event, data: diagnosticValue(data) };
++      session: diagnosticSession, appKey: diagnosticAppKey, event, data: diagnosticValue(data) };
 +    try {
 +      const records = readDiagnostics();
 +      records.push(entry);
@@ -153,7 +170,7 @@
 +    } catch (_) { /* 存储不可用时仍输出控制台日志。 */ }
 +    try { console.debug('[CGCA]', entry); } catch (_) { /* 忽略控制台异常。 */ }
 +    try {
-+      if (window.parent !== window) window.parent.postMessage({ type: 'cgca-diagnostic-v1', event, appKey: entry.appKey, diagnostics: data }, 'https://start.qq.com');
++      if (window.parent !== window) window.parent.postMessage({ type: 'cgca-diagnostic-v1', event, appKey: entry.appKey, diagnostics: entry.data }, '*');
 +    } catch (_) { /* 跨域或沙箱限制不影响本地日志。 */ }
 +    return entry;
 +  }
@@ -169,105 +186,43 @@
 +    } catch (_) { try { navigator.clipboard?.writeText(payload); } catch (__) { /* 忽略导出失败。 */ } }
 +    logDiagnostic('diagnostics-exported', { count: readDiagnostics().length });
 +  }
- 
-   function initAutomationUI() {
+@@ -17,0 +82 @@
 +    logDiagnostic('userscript-start', { href: window.location.href, visibility: document.visibilityState, online: navigator.onLine });
-     const APP_CONFIGS = {
-     jcc: {
-       name: '金铲铲',
-@@ -75,6 +120,7 @@
-   }
- 
-   function saveRunIntent(interval, loops) {
+@@ -53,0 +119 @@
++  diagnosticAppKey = initialAppKey;
+@@ -77,0 +144 @@
 +    logDiagnostic('run-intent-save', { interval, loops });
-     try {
-       sessionStorage.setItem(RUN_STATE_KEY, JSON.stringify({
-         appKey: state.appKey,
-@@ -86,6 +132,7 @@
-   }
- 
-   function clearRunIntent() {
+@@ -88,0 +156 @@
 +    logDiagnostic('run-intent-clear');
-     try { sessionStorage.removeItem(RUN_STATE_KEY); } catch (_) { /* 忽略存储异常。 */ }
-   }
- 
-@@ -109,6 +156,7 @@
-       </div>
-       <div class="cgca-row">
-         <button data-action="clear">清空坐标</button>
-+        <button data-action="export-diagnostics">导出日志</button>
-         <button data-action="export">导出</button>
-         <button data-action="import">导入</button>
-       </div>
-@@ -199,7 +247,7 @@
-     localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
-   }
- 
+@@ -111,0 +180 @@
++
+@@ -114,0 +184,2 @@
++      <div class="cgca-row"><button data-action="toggle-diagnostics">开始日志</button><button data-action="export-diagnostics">导出日志</button></div>
++      <div data-role="diagnostic-status" aria-live="polite">日志未记录</div>
+@@ -202 +273 @@
 -  function setStatus(text) { statusEl.textContent = text; }
-+  function setStatus(text) { statusEl.textContent = text; logDiagnostic('status', { text }); }
- 
-   function syncAppFromUrl() {
-     const appKey = detectAppKey();
-@@ -330,6 +378,7 @@
- 
-   function emitClick(point) {
-     const { x, y } = eventPosition(point);
++  function setStatus(text) { statusEl.textContent = text; if (!text.startsWith('运行中')) logDiagnostic('status', { text }); }
+@@ -210,0 +282 @@
++    diagnosticAppKey = appKey;
+@@ -332,0 +405 @@
 +    logDiagnostic('click-emitted', { point, x: Math.round(x), y: Math.round(y) });
-     const target = document.elementFromPoint(x, y) || getSurface() || document.body;
-     const options = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, screenX: x, screenY: y, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true };
-     for (const type of ['pointermove', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-@@ -359,6 +408,7 @@
-   }
- 
-   async function run() {
+@@ -361,0 +435 @@
 +    logDiagnostic('run-request', { running: state.running, points: state.points.length, interval: intervalEl.value, loops: loopsEl.value });
-     if (state.running || !state.points.length) {
-       if (!state.points.length) setStatus('还没有坐标，请先点击“记录”。');
-       return;
-@@ -377,6 +427,7 @@
-         for (let index = 0; index < points.length; index += 1) {
-           if (state.stopRequested) break;
-           setActiveMarker(index);
+@@ -379,0 +454 @@
 +          logDiagnostic('run-step', { loop: completed + 1, index, total: points.length });
-           emitClick(points[index]);
-           setStatus(state.loop === 0
-             ? `运行中 · 第 ${completed + 1} 轮 · 坐标 ${index + 1}/${points.length}`
-@@ -393,10 +444,12 @@
-       setActiveMarker(-1);
-       updateRunningUI();
-       setStatus(wasStopped ? `已停止 · 已完成 ${completed} 轮` : `运行完成 · 共 ${completed} 轮`);
+@@ -395,0 +471 @@
 +      logDiagnostic('run-finished', { stopped: wasStopped, completed });
-     }
-   }
- 
-   function stop() {
+@@ -399,0 +476 @@
 +    logDiagnostic('stop-request', { running: state.running });
-     if (!state.running) {
-       clearRunIntent();
-       return;
-@@ -408,7 +461,9 @@
- 
-   document.addEventListener('pointerdown', (event) => {
-     if (!state.recording || panel.contains(event.target)) return;
+@@ -411 +488,3 @@
 -    state.points.push(pointFromEvent(event));
 +    const point = pointFromEvent(event);
 +    state.points.push(point);
 +    logDiagnostic('point-recorded', { index: state.points.length - 1, point });
-     savePoints();
-     renderList();
-     setStatus(`已记录第 ${state.points.length} 个坐标，继续点击可继续记录。`);
-@@ -425,6 +480,7 @@
-     else if (action === 'stop') stop();
-     else if (action === 'clear') { stop(); state.points = []; savePoints(); renderList(); setStatus('坐标已清空。'); }
-     else if (action === 'minimize') panel.classList.toggle('cgca-collapsed');
+@@ -427,0 +507,2 @@
++    else if (action === 'toggle-diagnostics') setDiagnosticsEnabled(!diagnosticsEnabled);
 +    else if (action === 'export-diagnostics') exportDiagnostics();
-     else if (action === 'export') {
-       navigator.clipboard?.writeText(JSON.stringify(state.points));
-       setStatus('坐标 JSON 已复制，可保存到其他页面。');
-@@ -467,6 +523,16 @@
-       positionMarkers();
-     });
-   };
+@@ -469,0 +551,10 @@
 +  window.addEventListener('error', (event) => logDiagnostic('window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
 +  window.addEventListener('unhandledrejection', (event) => logDiagnostic('unhandled-rejection', { reason: event.reason }));
 +  window.addEventListener('offline', () => logDiagnostic('network-offline'));
@@ -278,26 +233,28 @@
 +  if (typeof PerformanceObserver !== 'undefined') {
 +    try { new PerformanceObserver((list) => list.getEntries().forEach((entry) => logDiagnostic('long-task', { duration: Math.round(entry.duration), startTime: Math.round(entry.startTime) }))).observe({ type: 'longtask', buffered: true }); } catch (_) { /* 忽略不支持的浏览器。 */ }
 +  }
-   window.addEventListener('resize', refreshMarkers, { passive: true });
-   window.addEventListener('scroll', refreshMarkers, { passive: true, capture: true });
-   setInterval(positionMarkers, 500);
-@@ -478,14 +544,18 @@
-     window.addEventListener('popstate', syncAppFromUrl);
-     setInterval(syncAppFromUrl, 2000);
- 
+@@ -472,0 +564,15 @@
++  let watchdogAt = Date.now();
++  setInterval(() => {
++    const now = Date.now();
++    const delayMs = Math.max(0, now - watchdogAt - 10000);
++    watchdogAt = now;
++    logDiagnostic('watchdog', { delayMs, running: state.running, points: state.points.length,
++      visibility: document.visibilityState, online: navigator.onLine,
++      memory: performance.memory ? { usedJSHeapSize: performance.memory.usedJSHeapSize } : null });
++  }, 10000);
++  diagnosticControls = { button: panel.querySelector('[data-action="toggle-diagnostics"]'), status: panel.querySelector('[data-role="diagnostic-status"]') };
++  window.addEventListener('message', (event) => {
++    if (event.source !== window.parent || event.data?.type !== 'cgca-diagnostic-control-v1' || typeof event.data.recording !== 'boolean') return;
++    setDiagnosticsEnabled(event.data.recording);
++  });
++  updateDiagnosticControls();
+@@ -480,0 +587 @@
 +    logDiagnostic('ui-ready', { points: state.points.length });
-     const runIntent = loadRunIntent();
-     if (runIntent) {
+@@ -482,0 +590 @@
 +      logDiagnostic('run-intent-found', runIntent);
-       intervalEl.value = String(runIntent.interval);
-       loopsEl.value = String(runIntent.loops);
-       setStatus('连接恢复后准备继续运行…');
-       setTimeout(async () => {
-         if (!loadRunIntent() || state.running) return;
+@@ -488 +596,3 @@
 -        if (await waitForSurface() && loadRunIntent()) run();
 +        const surfaceReady = await waitForSurface();
 +        logDiagnostic('surface-wait-finished', { surfaceReady, runIntent: Boolean(loadRunIntent()) });
 +        if (surfaceReady && loadRunIntent()) run();
-       }, 1000);
-     } else {
-       clearRunIntent();

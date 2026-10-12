@@ -30,7 +30,7 @@
 - 用户脚本不提供应用切换下拉，会根据当前网页 URL/hash 中的游戏 ID 自动选择配置。
 - 同一款游戏重新加载后，用户脚本会在画布出现时恢复之前正在运行的点击任务；手动停止或切换游戏会清除恢复意图。
 
-> 请同时更新 `index.html` 和 Tampermonkey 用户脚本（1.6.0），并允许脚本在 iframe 中运行。
+> 请同时更新 `index.html` 和 Tampermonkey 用户脚本（1.6.1），并允许脚本在 iframe 中运行。
 
 ## 验证
 
@@ -57,3 +57,5 @@ copy(localStorage.getItem('cloud-game-click-diagnostics-v1'))
 ```
 
 日志中的 `watchdog.delayMs` 明显增大、`long-task`、`window-error`、`unhandled-rejection`、`iframe-message` 和 `network-*` 事件可用于区分主线程阻塞、脚本异常、WebRTC 状态变化和网络问题。
+
+日志默认关闭，点击“开始记录日志”（用户脚本中为“开始日志”）后显示绿色“● 日志记录中”；再次点击停止。刷新后保留日志与记录开关。外层页面与云游戏 iframe 属于不同来源，日志分别存储，页面通过消息汇总 iframe 诊断；需要同时更新页面与 Tampermonkey 脚本到 1.6.1。

@@ -16,3 +16,95 @@ RESTORED_EQUALS_BASELINE: yes
 CHANGED_SYMBOLS: DIAGNOSTIC_KEY, logDiagnostic, watchdog, iframe-message, export-diagnostics
 TEST COMMAND: node --check cloud-game-click-automation.user.js && node --test tests/reconnect.test.cjs
 TEST RESULT: passed (5 tests)
+
+FOLLOW-UP: fix logDiagnostic state scope; add explicit recording toggle and visible status
+ROLLBACK command: /Users/a77/Desktop/git/cloud-game-click-automation/.diagnostics/ROLLBACK.sh /Users/a77/Desktop/git/cloud-game-click-automation/.diagnostics/rollback-check.user.js
+stdout:
+b09c21ac20aaed91f886acb8432efef5cde4c1ac369869832accb8aeac8bee0d  /Users/a77/Desktop/git/cloud-game-click-automation/.diagnostics/rollback-check.user.js
+stderr:
+exit: 0
+BASELINE command: CGCA_PROBE_SOURCE=/Users/a77/Desktop/git/cloud-game-click-automation/.diagnostics/userscript.previous node tests/diagnostics.test.cjs
+stdout:
+PROBE ReferenceError: state is not defined
+TAP version 13
+# Subtest: userscript initializes panel with logging disabled and retains original automation buttons
+ok 1 - userscript initializes panel with logging disabled and retains original automation buttons
+  ---
+  duration_ms: 1.493291
+  type: 'test'
+  ...
+# Subtest: start/stop diagnostics visibly updates status, preserves records and survives refresh
+ok 2 - start/stop diagnostics visibly updates status, preserves records and survives refresh
+  ---
+  duration_ms: 0.681375
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 7.525041
+stderr:
+exit: 0
+SHA256: 7d3bb5bd83b40b29a25d3954344f589291fcc72ccd8f6bb90c0291de9d9970b2
+MODIFIED command: CGCA_PROBE_SOURCE=/Users/a77/Desktop/git/cloud-game-click-automation/.diagnostics/MODIFIED_FILE.user.js node tests/diagnostics.test.cjs
+stdout:
+PROBE panel=true
+TAP version 13
+# Subtest: userscript initializes panel with logging disabled and retains original automation buttons
+ok 1 - userscript initializes panel with logging disabled and retains original automation buttons
+  ---
+  duration_ms: 0.871542
+  type: 'test'
+  ...
+# Subtest: start/stop diagnostics visibly updates status, preserves records and survives refresh
+ok 2 - start/stop diagnostics visibly updates status, preserves records and survives refresh
+  ---
+  duration_ms: 1.147542
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6.212291
+stderr:
+exit: 0
+SHA256: b2946024da02ba8efc907194658ad5b1dbc87b77fc7415e65d543854429a6c47
+ROLLBACK command: CGCA_PROBE_SOURCE=/Users/a77/Desktop/git/cloud-game-click-automation/.diagnostics/rollback-check.user.js node tests/diagnostics.test.cjs
+stdout:
+PROBE panel=true
+TAP version 13
+# Subtest: userscript initializes panel with logging disabled and retains original automation buttons
+ok 1 - userscript initializes panel with logging disabled and retains original automation buttons
+  ---
+  duration_ms: 1.376667
+  type: 'test'
+  ...
+# Subtest: start/stop diagnostics visibly updates status, preserves records and survives refresh
+ok 2 - start/stop diagnostics visibly updates status, preserves records and survives refresh
+  ---
+  duration_ms: 1.194834
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6.804959
+stderr:
+exit: 0
+SHA256: b09c21ac20aaed91f886acb8432efef5cde4c1ac369869832accb8aeac8bee0d
+Restored SHA equals pristine userscript baseline: yes

@@ -206,6 +206,8 @@
           </p>
         </div>
         <div class="app-picker">
+          <button type="button" data-action="toggle-diagnostics">开始记录日志</button>
+          <span data-role="diagnostic-status" aria-live="polite">日志未记录</span>
           <button type="button" data-action="export-diagnostics">导出诊断日志</button>
           <label for="app-select">应用</label>
           <select id="app-select" aria-label="选择应用">
@@ -262,8 +264,29 @@
           return Array.isArray(value) ? value : [];
         } catch (_) { return []; }
       }
+      const DIAGNOSTIC_ENABLED_KEY = 'cloud-game-click-diagnostics-enabled-v1';
+      let diagnosticsEnabled = false;
+      try { diagnosticsEnabled = localStorage.getItem(DIAGNOSTIC_ENABLED_KEY) === 'true'; } catch (_) {}
+      function syncDiagnosticsToFrames() {
+        windows.forEach((item) => item.querySelector('iframe').contentWindow?.postMessage?.({ type: 'cgca-diagnostic-control-v1', recording: diagnosticsEnabled }, 'https://start.qq.com'));
+      }
+      function updateDiagnosticControls() {
+        const button = document.querySelector('[data-action="toggle-diagnostics"]');
+        const status = document.querySelector('[data-role="diagnostic-status"]');
+        if (button) button.textContent = diagnosticsEnabled ? '停止记录日志' : '开始记录日志';
+        if (status) { status.textContent = diagnosticsEnabled ? '● 日志记录中' : '日志未记录'; status.setAttribute('style', diagnosticsEnabled ? 'color:#7cf0a0' : 'color:#91a6bc'); }
+      }
+      function setDiagnosticsEnabled(enabled) {
+        if (diagnosticsEnabled && !enabled) logDiagnostic('recording-stopped');
+        diagnosticsEnabled = enabled;
+        try { localStorage.setItem(DIAGNOSTIC_ENABLED_KEY, String(enabled)); } catch (_) {}
+        if (enabled) logDiagnostic('recording-started');
+        updateDiagnosticControls();
+        syncDiagnosticsToFrames();
+      }
       const diagnosticCounters = Object.create(null);
       function logDiagnostic(event, data = {}) {
+        if (!diagnosticsEnabled) return null;
         diagnosticCounters[event] = (diagnosticCounters[event] || 0) + 1;
         if (event === 'iframe-message' && data.event === 'heartbeat' && diagnosticCounters[event] % 60 !== 1) return null;
         const entry = { ts: new Date().toISOString(), mono: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
@@ -332,6 +355,8 @@
       appSelect.addEventListener('change', () => { logDiagnostic('app-change', { appKey: appSelect.value }); selectApp(appSelect.value); });
       document.querySelector('[data-action="reconnect"]').addEventListener('click', manualReconnect);
       document.querySelector('[data-action="export-diagnostics"]')?.addEventListener('click', exportDiagnostics);
+      document.querySelector('[data-action="toggle-diagnostics"]')?.addEventListener('click', () => setDiagnosticsEnabled(!diagnosticsEnabled));
+      updateDiagnosticControls();
       window.addEventListener('error', (event) => logDiagnostic('window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
       window.addEventListener('unhandledrejection', (event) => logDiagnostic('unhandled-rejection', { reason: event.reason }));
       window.addEventListener('offline', () => logDiagnostic('network-offline'));
@@ -340,8 +365,13 @@
       window.addEventListener('pagehide', () => logDiagnostic('page-hide'));
       window.addEventListener('pageshow', (event) => logDiagnostic('page-show', { persisted: event.persisted }));
       window.addEventListener('message', (event) => {
-        if (event.origin !== 'https://start.qq.com') return;
-        logDiagnostic('iframe-message', { origin: event.origin, type: event.data?.type || null, event: event.data?.event || null, connectionState: event.data?.connectionState || null });
+        if (event.origin !== 'https://start.qq.com' || !windows.some((item) => item.querySelector('iframe').contentWindow === event.source)) return;
+        if (event.data?.type === 'cgca-diagnostic-status-v1') {
+          if (typeof event.data.recording === 'boolean' && diagnosticsEnabled !== event.data.recording) { diagnosticsEnabled = event.data.recording; try { localStorage.setItem(DIAGNOSTIC_ENABLED_KEY, String(diagnosticsEnabled)); } catch (_) {} updateDiagnosticControls(); }
+          return;
+        }
+        if (event.data?.type !== 'cgca-diagnostic-v1') return;
+        logDiagnostic('iframe-message', { origin: event.origin, type: event.data?.type || null, event: event.data?.event || null, connectionState: event.data?.connectionState || null, diagnostics: event.data?.diagnostics || null });
       });
       if (typeof PerformanceObserver !== 'undefined') {
         try {
@@ -363,6 +393,7 @@
         frame.addEventListener('load', () => {
           gameWindow.querySelector('.window-state').textContent = '已加载';
           logDiagnostic('iframe-load', { src: frame.src || null });
+          syncDiagnosticsToFrames();
         });
         frame.addEventListener('error', (event) => logDiagnostic('iframe-error', { src: frame.src || null, error: event.error || null }));
         loadFrame(gameWindow);

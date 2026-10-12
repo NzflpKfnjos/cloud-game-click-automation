@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         云游戏点击脚本助手
 // @namespace    local.cloud-game-clicker
-// @version      1.6.0
+// @version      1.6.1
 // @description  记录并按顺序重放云游戏画布上的点击位置，重连后恢复运行
 // @match        https://start.qq.com/game/arm-game/*
 // @run-at       document-start
@@ -27,13 +27,33 @@
       return Array.isArray(value) ? value : [];
     } catch (_) { return []; }
   }
+  let diagnosticAppKey = null;
+  const DIAGNOSTIC_ENABLED_KEY = 'cloud-game-click-diagnostics-enabled-v1';
+  let diagnosticsEnabled = false;
+  try { diagnosticsEnabled = localStorage.getItem(DIAGNOSTIC_ENABLED_KEY) === 'true'; } catch (_) {}
+  let diagnosticControls = null;
+  function setDiagnosticsEnabled(enabled) {
+    if (diagnosticsEnabled && !enabled) logDiagnostic('recording-stopped');
+    diagnosticsEnabled = enabled;
+    try { localStorage.setItem(DIAGNOSTIC_ENABLED_KEY, String(enabled)); } catch (_) {}
+    if (enabled) logDiagnostic('recording-started');
+    updateDiagnosticControls();
+  }
+  function updateDiagnosticControls() {
+    if (!diagnosticControls) return;
+    diagnosticControls.button.textContent = diagnosticsEnabled ? '停止日志' : '开始日志';
+    diagnosticControls.status.textContent = diagnosticsEnabled ? '● 日志记录中' : '日志未记录';
+    diagnosticControls.status.style.color = diagnosticsEnabled ? '#7cf0a0' : '#aabbd0';
+    try { if (window.parent !== window) window.parent.postMessage({ type: 'cgca-diagnostic-status-v1', recording: diagnosticsEnabled }, '*'); } catch (_) {}
+  }
   const diagnosticCounters = Object.create(null);
   function logDiagnostic(event, data = {}) {
+    if (!diagnosticsEnabled) return null;
     diagnosticCounters[event] = (diagnosticCounters[event] || 0) + 1;
     if ((event === 'click-emitted' || event === 'run-step') && diagnosticCounters[event] % 100 !== 1) return null;
     if (event === 'status' && diagnosticCounters[event] % 20 !== 1) return null;
     const entry = { ts: new Date().toISOString(), mono: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
-      session: diagnosticSession, appKey: state?.appKey || null, event, data: diagnosticValue(data) };
+      session: diagnosticSession, appKey: diagnosticAppKey, event, data: diagnosticValue(data) };
     try {
       const records = readDiagnostics();
       records.push(entry);
@@ -41,7 +61,7 @@
     } catch (_) { /* 存储不可用时仍输出控制台日志。 */ }
     try { console.debug('[CGCA]', entry); } catch (_) { /* 忽略控制台异常。 */ }
     try {
-      if (window.parent !== window) window.parent.postMessage({ type: 'cgca-diagnostic-v1', event, appKey: entry.appKey, diagnostics: data }, 'https://start.qq.com');
+      if (window.parent !== window) window.parent.postMessage({ type: 'cgca-diagnostic-v1', event, appKey: entry.appKey, diagnostics: entry.data }, '*');
     } catch (_) { /* 跨域或沙箱限制不影响本地日志。 */ }
     return entry;
   }
@@ -96,6 +116,7 @@
   }
 
   const initialAppKey = detectAppKey();
+  diagnosticAppKey = initialAppKey;
   const state = {
     appKey: initialAppKey,
     points: loadPoints(initialAppKey),
@@ -156,10 +177,12 @@
       </div>
       <div class="cgca-row">
         <button data-action="clear">清空坐标</button>
-        <button data-action="export-diagnostics">导出日志</button>
+
         <button data-action="export">导出</button>
         <button data-action="import">导入</button>
       </div>
+      <div class="cgca-row"><button data-action="toggle-diagnostics">开始日志</button><button data-action="export-diagnostics">导出日志</button></div>
+      <div data-role="diagnostic-status" aria-live="polite">日志未记录</div>
       <ol data-role="list"></ol>
       <div class="cgca-help">快捷键：F8 运行/停止，F9 记录，Esc 停止</div>
     </div>`;
@@ -247,7 +270,7 @@
     localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
   }
 
-  function setStatus(text) { statusEl.textContent = text; logDiagnostic('status', { text }); }
+  function setStatus(text) { statusEl.textContent = text; if (!text.startsWith('运行中')) logDiagnostic('status', { text }); }
 
   function syncAppFromUrl() {
     const appKey = detectAppKey();
@@ -256,6 +279,7 @@
     clearRunIntent();
     savePoints();
     state.appKey = appKey;
+    diagnosticAppKey = appKey;
     state.points = loadPoints(appKey);
     intervalEl.value = String(APP_CONFIGS[appKey].defaultInterval);
     state.recording = false;
@@ -480,6 +504,7 @@
     else if (action === 'stop') stop();
     else if (action === 'clear') { stop(); state.points = []; savePoints(); renderList(); setStatus('坐标已清空。'); }
     else if (action === 'minimize') panel.classList.toggle('cgca-collapsed');
+    else if (action === 'toggle-diagnostics') setDiagnosticsEnabled(!diagnosticsEnabled);
     else if (action === 'export-diagnostics') exportDiagnostics();
     else if (action === 'export') {
       navigator.clipboard?.writeText(JSON.stringify(state.points));
@@ -536,6 +561,21 @@
   window.addEventListener('resize', refreshMarkers, { passive: true });
   window.addEventListener('scroll', refreshMarkers, { passive: true, capture: true });
   setInterval(positionMarkers, 500);
+  let watchdogAt = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const delayMs = Math.max(0, now - watchdogAt - 10000);
+    watchdogAt = now;
+    logDiagnostic('watchdog', { delayMs, running: state.running, points: state.points.length,
+      visibility: document.visibilityState, online: navigator.onLine,
+      memory: performance.memory ? { usedJSHeapSize: performance.memory.usedJSHeapSize } : null });
+  }, 10000);
+  diagnosticControls = { button: panel.querySelector('[data-action="toggle-diagnostics"]'), status: panel.querySelector('[data-role="diagnostic-status"]') };
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent || event.data?.type !== 'cgca-diagnostic-control-v1' || typeof event.data.recording !== 'boolean') return;
+    setDiagnosticsEnabled(event.data.recording);
+  });
+  updateDiagnosticControls();
 
     updateRunningUI();
     renderList();
