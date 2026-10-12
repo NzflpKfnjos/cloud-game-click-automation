@@ -1,0 +1,18 @@
+TARGET: /Users/a77/Desktop/git/cloud-game-click-automation/index.html
+SUPPLEMENTAL_TARGET: /Users/a77/Desktop/git/cloud-game-click-automation/cloud-game-click-automation.user.js
+COMMAND (same input for all states): node -e "read HTML and check diagnosticsButton/watchdog markers"
+BASELINE stdout: {"diagnosticsButton":false,"watchdog":false}
+BASELINE exit: 0
+BASELINE sha256: 82ff3e2c33db2587b130db0c9474347bf79583bc76920974bc6d61a0c97b762d
+MODIFIED stdout: {"diagnosticsButton":true,"watchdog":true}
+MODIFIED exit: 0
+MODIFIED sha256: 9493fa47292da30aeb2b51f294c24dd8d041ca7a616018408a82a31c535e11e3
+ROLLBACK command: /Users/a77/Desktop/git/cloud-game-click-automation/.diagnostics/ROLLBACK.sh /Users/a77/Desktop/git/cloud-game-click-automation/.diagnostics/rollback-check.html
+ROLLBACK stdout: 82ff3e2c33db2587b130db0c9474347bf79583bc76920974bc6d61a0c97b762d  .diagnostics/rollback-check.html
+ROLLBACK same-input stdout: {"diagnosticsButton":false,"watchdog":false}
+ROLLBACK exit: 0
+ROLLBACK sha256: 82ff3e2c33db2587b130db0c9474347bf79583bc76920974bc6d61a0c97b762d
+RESTORED_EQUALS_BASELINE: yes
+CHANGED_SYMBOLS: DIAGNOSTIC_KEY, logDiagnostic, watchdog, iframe-message, export-diagnostics
+TEST COMMAND: node --check cloud-game-click-automation.user.js && node --test tests/reconnect.test.cjs
+TEST RESULT: passed (5 tests)

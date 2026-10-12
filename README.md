@@ -45,3 +45,15 @@
   { "x": 0.4544908588435374, "y": 0.8035941475826972, "global": false }
 ]
 ```
+
+## 卡顿诊断日志
+
+页面和用户脚本会把诊断记录写入同一个 `localStorage` 键 `cloud-game-click-diagnostics-v1`，最多保留最近 3000 条。记录包含页面/脚本会话、iframe 加载与错误、网络和可见性变化、跨 iframe WebRTC/心跳消息、未捕获异常、长任务、事件循环延迟、内存快照、点击运行步骤和恢复意图；刷新页面不会清除这些记录。
+
+出现画面卡住时先不要刷新，点击页面顶部的“导出诊断日志”（或脚本面板的“导出日志”），保存下载的 JSON 后再刷新。若页面完全无法点击，可在开发者工具 Console 执行：
+
+```js
+copy(localStorage.getItem('cloud-game-click-diagnostics-v1'))
+```
+
+日志中的 `watchdog.delayMs` 明显增大、`long-task`、`window-error`、`unhandled-rejection`、`iframe-message` 和 `network-*` 事件可用于区分主线程阻塞、脚本异常、WebRTC 状态变化和网络问题。

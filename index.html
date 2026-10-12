@@ -206,6 +206,7 @@
           </p>
         </div>
         <div class="app-picker">
+          <button type="button" data-action="export-diagnostics">导出诊断日志</button>
           <label for="app-select">应用</label>
           <select id="app-select" aria-label="选择应用">
             <option value="jcc">金铲铲自动对战</option>
@@ -246,6 +247,50 @@
       const windows = [...document.querySelectorAll('.game-window')];
       let currentApp = APPS[appSelect.value];
 
+      // 持久化诊断日志：刷新后仍保留，用于分析长时间运行后的卡顿。
+      const DIAGNOSTIC_KEY = 'cloud-game-click-diagnostics-v1';
+      const DIAGNOSTIC_LIMIT = 2000;
+      const diagnosticSession = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      function diagnosticValue(value) {
+        if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
+        if (value === undefined) return null;
+        try { JSON.stringify(value); return value; } catch (_) { return String(value); }
+      }
+      function readDiagnostics() {
+        try {
+          const value = JSON.parse(localStorage.getItem(DIAGNOSTIC_KEY) || '[]');
+          return Array.isArray(value) ? value : [];
+        } catch (_) { return []; }
+      }
+      const diagnosticCounters = Object.create(null);
+      function logDiagnostic(event, data = {}) {
+        diagnosticCounters[event] = (diagnosticCounters[event] || 0) + 1;
+        if (event === 'iframe-message' && data.event === 'heartbeat' && diagnosticCounters[event] % 60 !== 1) return null;
+        const entry = { ts: new Date().toISOString(), mono: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
+          session: diagnosticSession, event, data: diagnosticValue(data) };
+        try {
+          const records = readDiagnostics();
+          records.push(entry);
+          localStorage.setItem(DIAGNOSTIC_KEY, JSON.stringify(records.slice(-DIAGNOSTIC_LIMIT)));
+        } catch (_) { /* 存储配额或隐私模式不可用时仍保留控制台日志。 */ }
+        try { console.debug('[CGCA]', entry); } catch (_) { /* 控制台不可用不影响页面。 */ }
+        return entry;
+      }
+      function exportDiagnostics() {
+        const payload = JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), records: readDiagnostics() }, null, 2);
+        try {
+          const blob = new Blob([payload], { type: 'application/json' });
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);
+          link.download = `cloud-game-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+        } catch (_) { try { navigator.clipboard?.writeText(payload); } catch (__) { /* 忽略导出失败。 */ } }
+        logDiagnostic('diagnostics-exported', { count: readDiagnostics().length });
+      }
+      window.__CGCA_DIAGNOSTICS = { log: logDiagnostic, read: readDiagnostics, export: exportDiagnostics };
+      logDiagnostic('page-start', { href: window.location?.href || null, visibility: document.visibilityState, online: navigator.onLine });
+
       function createFrameUrl() {
         const url = new URL(currentApp.url);
         url.searchParams.set('_reconnect', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -254,6 +299,7 @@
 
       function loadFrame(gameWindow, reason = 'initial') {
         const frame = gameWindow.querySelector('iframe');
+        logDiagnostic('iframe-load-request', { reason, previousSrc: frame.src || null });
         gameWindow.querySelector('.window-state').textContent = reason === 'initial'
           ? '加载中...'
           : '正在重新连接...';
@@ -261,6 +307,7 @@
       }
 
       function reconnect() {
+        logDiagnostic('manual-reconnect', { windows: windows.length });
         windows.forEach((gameWindow) => loadFrame(gameWindow, 'reconnect'));
       }
 
@@ -282,14 +329,42 @@
         reconnect();
       }
 
-      appSelect.addEventListener('change', () => selectApp(appSelect.value));
+      appSelect.addEventListener('change', () => { logDiagnostic('app-change', { appKey: appSelect.value }); selectApp(appSelect.value); });
       document.querySelector('[data-action="reconnect"]').addEventListener('click', manualReconnect);
+      document.querySelector('[data-action="export-diagnostics"]')?.addEventListener('click', exportDiagnostics);
+      window.addEventListener('error', (event) => logDiagnostic('window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
+      window.addEventListener('unhandledrejection', (event) => logDiagnostic('unhandled-rejection', { reason: event.reason }));
+      window.addEventListener('offline', () => logDiagnostic('network-offline'));
+      window.addEventListener('online', () => logDiagnostic('network-online'));
+      document.addEventListener('visibilitychange', () => logDiagnostic('visibility-change', { visibility: document.visibilityState }));
+      window.addEventListener('pagehide', () => logDiagnostic('page-hide'));
+      window.addEventListener('pageshow', (event) => logDiagnostic('page-show', { persisted: event.persisted }));
+      window.addEventListener('message', (event) => {
+        if (event.origin !== 'https://start.qq.com') return;
+        logDiagnostic('iframe-message', { origin: event.origin, type: event.data?.type || null, event: event.data?.event || null, connectionState: event.data?.connectionState || null });
+      });
+      if (typeof PerformanceObserver !== 'undefined') {
+        try {
+          new PerformanceObserver((list) => list.getEntries().forEach((entry) => logDiagnostic('long-task', { duration: Math.round(entry.duration), startTime: Math.round(entry.startTime) }))).observe({ type: 'longtask', buffered: true });
+        } catch (_) { /* 浏览器不支持 longtask 时使用事件循环哨兵。 */ }
+      }
+      if (typeof performance !== 'undefined' && typeof setInterval === 'function') {
+        let watchdogAt = Date.now();
+        setInterval(() => {
+          const now = Date.now();
+          const delay = now - watchdogAt - 10000;
+          watchdogAt = now;
+          logDiagnostic('watchdog', { delayMs: Math.max(0, delay), visibility: document.visibilityState, online: navigator.onLine, iframeSrc: windows[0]?.querySelector('iframe')?.src || null });
+        }, 10000);
+      }
 
       windows.forEach((gameWindow) => {
         const frame = gameWindow.querySelector('iframe');
         frame.addEventListener('load', () => {
           gameWindow.querySelector('.window-state').textContent = '已加载';
+          logDiagnostic('iframe-load', { src: frame.src || null });
         });
+        frame.addEventListener('error', (event) => logDiagnostic('iframe-error', { src: frame.src || null, error: event.error || null }));
         loadFrame(gameWindow);
       });
     </script>

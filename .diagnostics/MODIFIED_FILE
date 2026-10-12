@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>金铲铲自动对战</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: #0d1520;
+        --surface: #152232;
+        --surface-raised: #1b2b3f;
+        --border: #31475e;
+        --text: #eaf2fb;
+        --muted: #91a6bc;
+        --accent: #54b6ff;
+        --accent-strong: #258bd3;
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body { min-height: 100%; }
+
+      body {
+        margin: 0;
+        background: var(--page);
+        color: var(--text);
+        font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .app {
+        display: flex;
+        min-height: 100vh;
+        flex-direction: column;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 18px 24px;
+        border-bottom: 1px solid var(--border);
+        background: #111c2a;
+      }
+
+      .app-picker {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .app-picker label { font-size: 12px; }
+
+      .app-picker select {
+        min-height: 34px;
+        padding: 6px 30px 6px 9px;
+        border: 1px solid #49647e;
+        border-radius: 5px;
+        background: #22364c;
+        color: var(--text);
+        font: inherit;
+      }
+
+      .title-group { min-width: 0; }
+
+      h1 {
+        margin: 0;
+        font-size: 20px;
+        line-height: 1.2;
+        letter-spacing: 0;
+      }
+
+      .subtitle {
+        margin: 5px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .subtitle a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      .subtitle a:hover,
+      .subtitle a:focus-visible {
+        text-decoration: underline;
+      }
+
+      button {
+        min-height: 34px;
+        padding: 7px 12px;
+        border: 1px solid #49647e;
+        border-radius: 5px;
+        background: #22364c;
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+      }
+
+      main {
+        display: flex;
+        width: min(1800px, 100%);
+        flex: 1;
+        margin: 0 auto;
+        padding: 18px;
+      }
+
+      .window-grid {
+        display: grid;
+        width: 100%;
+        min-height: 0;
+        align-items: center;
+        justify-items: center;
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+        gap: 14px;
+      }
+
+      .game-window {
+        display: flex;
+        width: min(100%, 1600px, calc(177.78vh - 266.67px));
+        min-width: 0;
+        min-height: 0;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--surface);
+        box-shadow: 0 7px 24px #0000002b;
+      }
+
+      .window-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 42px;
+        padding: 7px 10px 7px 13px;
+        background: var(--surface-raised);
+      }
+
+      .window-label {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+      }
+
+      .window-dot {
+        width: 8px;
+        height: 8px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 0 3px #54b6ff1c;
+      }
+
+      .window-state {
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 400;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .window-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+      .window-actions button { min-height: 28px; padding: 4px 9px; font-size: 12px; }
+
+      iframe {
+        display: block;
+        width: 100%;
+        height: auto;
+        aspect-ratio: 16 / 9;
+        min-height: 0;
+        flex: 0 1 auto;
+        border: 0;
+        background: #080d14;
+      }
+
+      @media (max-width: 760px) {
+        .topbar { align-items: flex-start; flex-direction: column; padding: 15px; }
+        main { padding: 12px; }
+        .window-grid { grid-template-columns: 1fr; grid-template-rows: minmax(360px, 1fr); }
+        .game-window { width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="title-group">
+          <h1>金铲铲自动对战</h1>
+          <p class="subtitle">
+            <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey 官网</a>
+            <span aria-hidden="true"> · </span>
+            <a href="https://jcc.5678989.eu.org/cloud-game-click-automation.user.js" target="_blank" rel="noopener noreferrer">自动化脚本</a>
+            <span aria-hidden="true"> · </span>
+            <a href="chrome://extensions/" target="_blank" rel="noopener noreferrer">Chrome 扩展管理</a>
+            <span aria-hidden="true"> · </span>
+            <a href="edge://extensions/" target="_blank" rel="noopener noreferrer">Edge 扩展管理</a>
+          </p>
+        </div>
+        <div class="app-picker">
+          <button type="button" data-action="export-diagnostics">导出诊断日志</button>
+          <label for="app-select">应用</label>
+          <select id="app-select" aria-label="选择应用">
+            <option value="jcc">金铲铲自动对战</option>
+            <option value="naruto">火影忍者</option>
+          </select>
+        </div>
+      </header>
+
+      <main>
+        <section class="window-grid" aria-label="金铲铲自动对战">
+          <article class="game-window" data-window="1">
+            <div class="window-bar">
+              <div class="window-label"><span class="window-dot"></span><span data-role="window-title">金铲铲自动对战</span><span class="window-state">加载中...</span></div>
+              <div class="window-actions">
+                <button type="button" data-action="reconnect">重新连接</button>
+              </div>
+            </div>
+            <iframe title="金铲铲自动对战" loading="eager" allow="autoplay; fullscreen; clipboard-read; clipboard-write"></iframe>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const APPS = {
+        jcc: {
+          name: '金铲铲自动对战',
+          url: 'https://start.qq.com/game/arm-game/?ADTAG=10000000&extra=eyJob21lIjoiaHR0cHM6Ly9zdGFydC5xcS5jb20vd2ViZ2FtZS9wcmUtcGxheWluZy83MDA5Njc/ZnJvbVBhZ2U9Z2FtZV9kZXRhaWxfcGFnZSZBRFRBRz0xMDAwMDAwMCIsInN0YXJ0VmVyc2lvbiI6IjAuMTAuOTQwLjUwMDYwMDIiLCJ3ZWJjZ19jb21tb24iOjF9#/game/700967?time=1790047923464',
+        },
+        naruto: {
+          name: '火影忍者',
+          url: 'https://start.qq.com/game/arm-game/?ADTAG=10000000&extra=eyJob21lIjoiaHR0cHM6Ly9zdGFydC5xcS5jb20vd2ViZ2FtZS9wcmUtcGxheWluZy83MDA3MjQ/ZnJvbVBhZ2U9Z2FtZV9kZXRhaWxfcGFnZSZBRFRBRz0xMDAwMDAwMCIsInN0YXJ0VmVyc2lvbiI6IjAuMTAuOTAwLjUwMDYwMDIiLCJ3ZWJjZ19jb21tb24iOjF9#/game/700724?time=1790742724938',
+        },
+      };
+
+      const appSelect = document.querySelector('#app-select');
+      const windowGrid = document.querySelector('.window-grid');
+      const windows = [...document.querySelectorAll('.game-window')];
+      let currentApp = APPS[appSelect.value];
+
+      // 持久化诊断日志：刷新后仍保留，用于分析长时间运行后的卡顿。
+      const DIAGNOSTIC_KEY = 'cloud-game-click-diagnostics-v1';
+      const DIAGNOSTIC_LIMIT = 2000;
+      const diagnosticSession = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      function diagnosticValue(value) {
+        if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
+        if (value === undefined) return null;
+        try { JSON.stringify(value); return value; } catch (_) { return String(value); }
+      }
+      function readDiagnostics() {
+        try {
+          const value = JSON.parse(localStorage.getItem(DIAGNOSTIC_KEY) || '[]');
+          return Array.isArray(value) ? value : [];
+        } catch (_) { return []; }
+      }
+      const diagnosticCounters = Object.create(null);
+      function logDiagnostic(event, data = {}) {
+        diagnosticCounters[event] = (diagnosticCounters[event] || 0) + 1;
+        if (event === 'iframe-message' && data.event === 'heartbeat' && diagnosticCounters[event] % 60 !== 1) return null;
+        const entry = { ts: new Date().toISOString(), mono: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
+          session: diagnosticSession, event, data: diagnosticValue(data) };
+        try {
+          const records = readDiagnostics();
+          records.push(entry);
+          localStorage.setItem(DIAGNOSTIC_KEY, JSON.stringify(records.slice(-DIAGNOSTIC_LIMIT)));
+        } catch (_) { /* 存储配额或隐私模式不可用时仍保留控制台日志。 */ }
+        try { console.debug('[CGCA]', entry); } catch (_) { /* 控制台不可用不影响页面。 */ }
+        return entry;
+      }
+      function exportDiagnostics() {
+        const payload = JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), records: readDiagnostics() }, null, 2);
+        try {
+          const blob = new Blob([payload], { type: 'application/json' });
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);
+          link.download = `cloud-game-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+        } catch (_) { try { navigator.clipboard?.writeText(payload); } catch (__) { /* 忽略导出失败。 */ } }
+        logDiagnostic('diagnostics-exported', { count: readDiagnostics().length });
+      }
+      window.__CGCA_DIAGNOSTICS = { log: logDiagnostic, read: readDiagnostics, export: exportDiagnostics };
+      logDiagnostic('page-start', { href: window.location?.href || null, visibility: document.visibilityState, online: navigator.onLine });
+
+      function createFrameUrl() {
+        const url = new URL(currentApp.url);
+        url.searchParams.set('_reconnect', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+        return url.toString();
+      }
+
+      function loadFrame(gameWindow, reason = 'initial') {
+        const frame = gameWindow.querySelector('iframe');
+        logDiagnostic('iframe-load-request', { reason, previousSrc: frame.src || null });
+        gameWindow.querySelector('.window-state').textContent = reason === 'initial'
+          ? '加载中...'
+          : '正在重新连接...';
+        frame.src = createFrameUrl();
+      }
+
+      function reconnect() {
+        logDiagnostic('manual-reconnect', { windows: windows.length });
+        windows.forEach((gameWindow) => loadFrame(gameWindow, 'reconnect'));
+      }
+
+      function selectApp(appKey) {
+        const app = APPS[appKey];
+        if (!app || app === currentApp) return;
+        currentApp = app;
+        document.title = app.name;
+        document.querySelector('h1').textContent = app.name;
+        windowGrid.setAttribute('aria-label', app.name);
+        windows.forEach((gameWindow) => {
+          gameWindow.querySelector('[data-role="window-title"]').textContent = app.name;
+          gameWindow.querySelector('iframe').title = app.name;
+          loadFrame(gameWindow);
+        });
+      }
+
+      function manualReconnect() {
+        reconnect();
+      }
+
+      appSelect.addEventListener('change', () => { logDiagnostic('app-change', { appKey: appSelect.value }); selectApp(appSelect.value); });
+      document.querySelector('[data-action="reconnect"]').addEventListener('click', manualReconnect);
+      document.querySelector('[data-action="export-diagnostics"]')?.addEventListener('click', exportDiagnostics);
+      window.addEventListener('error', (event) => logDiagnostic('window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
+      window.addEventListener('unhandledrejection', (event) => logDiagnostic('unhandled-rejection', { reason: event.reason }));
+      window.addEventListener('offline', () => logDiagnostic('network-offline'));
+      window.addEventListener('online', () => logDiagnostic('network-online'));
+      document.addEventListener('visibilitychange', () => logDiagnostic('visibility-change', { visibility: document.visibilityState }));
+      window.addEventListener('pagehide', () => logDiagnostic('page-hide'));
+      window.addEventListener('pageshow', (event) => logDiagnostic('page-show', { persisted: event.persisted }));
+      window.addEventListener('message', (event) => {
+        if (event.origin !== 'https://start.qq.com') return;
+        logDiagnostic('iframe-message', { origin: event.origin, type: event.data?.type || null, event: event.data?.event || null, connectionState: event.data?.connectionState || null });
+      });
+      if (typeof PerformanceObserver !== 'undefined') {
+        try {
+          new PerformanceObserver((list) => list.getEntries().forEach((entry) => logDiagnostic('long-task', { duration: Math.round(entry.duration), startTime: Math.round(entry.startTime) }))).observe({ type: 'longtask', buffered: true });
+        } catch (_) { /* 浏览器不支持 longtask 时使用事件循环哨兵。 */ }
+      }
+      if (typeof performance !== 'undefined' && typeof setInterval === 'function') {
+        let watchdogAt = Date.now();
+        setInterval(() => {
+          const now = Date.now();
+          const delay = now - watchdogAt - 10000;
+          watchdogAt = now;
+          logDiagnostic('watchdog', { delayMs: Math.max(0, delay), visibility: document.visibilityState, online: navigator.onLine, iframeSrc: windows[0]?.querySelector('iframe')?.src || null });
+        }, 10000);
+      }
+
+      windows.forEach((gameWindow) => {
+        const frame = gameWindow.querySelector('iframe');
+        frame.addEventListener('load', () => {
+          gameWindow.querySelector('.window-state').textContent = '已加载';
+          logDiagnostic('iframe-load', { src: frame.src || null });
+        });
+        frame.addEventListener('error', (event) => logDiagnostic('iframe-error', { src: frame.src || null, error: event.error || null }));
+        loadFrame(gameWindow);
+      });
+    </script>
+  </body>
+</html>

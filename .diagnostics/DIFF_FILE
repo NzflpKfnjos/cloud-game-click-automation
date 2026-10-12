@@ -1,0 +1,303 @@
+--- .diagnostics/index.html.baseline	2026-10-12 10:42:40
++++ .diagnostics/MODIFIED_FILE	2026-10-12 10:47:28
+@@ -206,6 +206,7 @@
+           </p>
+         </div>
+         <div class="app-picker">
++          <button type="button" data-action="export-diagnostics">导出诊断日志</button>
+           <label for="app-select">应用</label>
+           <select id="app-select" aria-label="选择应用">
+             <option value="jcc">金铲铲自动对战</option>
+@@ -246,6 +247,50 @@
+       const windows = [...document.querySelectorAll('.game-window')];
+       let currentApp = APPS[appSelect.value];
+ 
++      // 持久化诊断日志：刷新后仍保留，用于分析长时间运行后的卡顿。
++      const DIAGNOSTIC_KEY = 'cloud-game-click-diagnostics-v1';
++      const DIAGNOSTIC_LIMIT = 2000;
++      const diagnosticSession = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
++      function diagnosticValue(value) {
++        if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
++        if (value === undefined) return null;
++        try { JSON.stringify(value); return value; } catch (_) { return String(value); }
++      }
++      function readDiagnostics() {
++        try {
++          const value = JSON.parse(localStorage.getItem(DIAGNOSTIC_KEY) || '[]');
++          return Array.isArray(value) ? value : [];
++        } catch (_) { return []; }
++      }
++      const diagnosticCounters = Object.create(null);
++      function logDiagnostic(event, data = {}) {
++        diagnosticCounters[event] = (diagnosticCounters[event] || 0) + 1;
++        if (event === 'iframe-message' && data.event === 'heartbeat' && diagnosticCounters[event] % 60 !== 1) return null;
++        const entry = { ts: new Date().toISOString(), mono: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
++          session: diagnosticSession, event, data: diagnosticValue(data) };
++        try {
++          const records = readDiagnostics();
++          records.push(entry);
++          localStorage.setItem(DIAGNOSTIC_KEY, JSON.stringify(records.slice(-DIAGNOSTIC_LIMIT)));
++        } catch (_) { /* 存储配额或隐私模式不可用时仍保留控制台日志。 */ }
++        try { console.debug('[CGCA]', entry); } catch (_) { /* 控制台不可用不影响页面。 */ }
++        return entry;
++      }
++      function exportDiagnostics() {
++        const payload = JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), records: readDiagnostics() }, null, 2);
++        try {
++          const blob = new Blob([payload], { type: 'application/json' });
++          const link = document.createElement('a');
++          link.href = URL.createObjectURL(blob);
++          link.download = `cloud-game-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
++          link.click();
++          setTimeout(() => URL.revokeObjectURL(link.href), 1000);
++        } catch (_) { try { navigator.clipboard?.writeText(payload); } catch (__) { /* 忽略导出失败。 */ } }
++        logDiagnostic('diagnostics-exported', { count: readDiagnostics().length });
++      }
++      window.__CGCA_DIAGNOSTICS = { log: logDiagnostic, read: readDiagnostics, export: exportDiagnostics };
++      logDiagnostic('page-start', { href: window.location?.href || null, visibility: document.visibilityState, online: navigator.onLine });
++
+       function createFrameUrl() {
+         const url = new URL(currentApp.url);
+         url.searchParams.set('_reconnect', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+@@ -254,6 +299,7 @@
+ 
+       function loadFrame(gameWindow, reason = 'initial') {
+         const frame = gameWindow.querySelector('iframe');
++        logDiagnostic('iframe-load-request', { reason, previousSrc: frame.src || null });
+         gameWindow.querySelector('.window-state').textContent = reason === 'initial'
+           ? '加载中...'
+           : '正在重新连接...';
+@@ -261,6 +307,7 @@
+       }
+ 
+       function reconnect() {
++        logDiagnostic('manual-reconnect', { windows: windows.length });
+         windows.forEach((gameWindow) => loadFrame(gameWindow, 'reconnect'));
+       }
+ 
+@@ -282,14 +329,42 @@
+         reconnect();
+       }
+ 
+-      appSelect.addEventListener('change', () => selectApp(appSelect.value));
++      appSelect.addEventListener('change', () => { logDiagnostic('app-change', { appKey: appSelect.value }); selectApp(appSelect.value); });
+       document.querySelector('[data-action="reconnect"]').addEventListener('click', manualReconnect);
++      document.querySelector('[data-action="export-diagnostics"]')?.addEventListener('click', exportDiagnostics);
++      window.addEventListener('error', (event) => logDiagnostic('window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
++      window.addEventListener('unhandledrejection', (event) => logDiagnostic('unhandled-rejection', { reason: event.reason }));
++      window.addEventListener('offline', () => logDiagnostic('network-offline'));
++      window.addEventListener('online', () => logDiagnostic('network-online'));
++      document.addEventListener('visibilitychange', () => logDiagnostic('visibility-change', { visibility: document.visibilityState }));
++      window.addEventListener('pagehide', () => logDiagnostic('page-hide'));
++      window.addEventListener('pageshow', (event) => logDiagnostic('page-show', { persisted: event.persisted }));
++      window.addEventListener('message', (event) => {
++        if (event.origin !== 'https://start.qq.com') return;
++        logDiagnostic('iframe-message', { origin: event.origin, type: event.data?.type || null, event: event.data?.event || null, connectionState: event.data?.connectionState || null });
++      });
++      if (typeof PerformanceObserver !== 'undefined') {
++        try {
++          new PerformanceObserver((list) => list.getEntries().forEach((entry) => logDiagnostic('long-task', { duration: Math.round(entry.duration), startTime: Math.round(entry.startTime) }))).observe({ type: 'longtask', buffered: true });
++        } catch (_) { /* 浏览器不支持 longtask 时使用事件循环哨兵。 */ }
++      }
++      if (typeof performance !== 'undefined' && typeof setInterval === 'function') {
++        let watchdogAt = Date.now();
++        setInterval(() => {
++          const now = Date.now();
++          const delay = now - watchdogAt - 10000;
++          watchdogAt = now;
++          logDiagnostic('watchdog', { delayMs: Math.max(0, delay), visibility: document.visibilityState, online: navigator.onLine, iframeSrc: windows[0]?.querySelector('iframe')?.src || null });
++        }, 10000);
++      }
+ 
+       windows.forEach((gameWindow) => {
+         const frame = gameWindow.querySelector('iframe');
+         frame.addEventListener('load', () => {
+           gameWindow.querySelector('.window-state').textContent = '已加载';
++          logDiagnostic('iframe-load', { src: frame.src || null });
+         });
++        frame.addEventListener('error', (event) => logDiagnostic('iframe-error', { src: frame.src || null, error: event.error || null }));
+         loadFrame(gameWindow);
+       });
+     </script>
+--- .diagnostics/cloud-game-click-automation.user.js.baseline	2026-10-12 10:42:40
++++ .diagnostics/MODIFIED_FILE.user.js	2026-10-12 10:47:28
+@@ -13,8 +13,53 @@
+ 
+   const STORAGE_KEY = 'cloud-game-click-automation-v1';
+   const RUN_STATE_KEY = 'cloud-game-click-run-v1';
++  const DIAGNOSTIC_KEY = 'cloud-game-click-diagnostics-v1';
++  const DIAGNOSTIC_LIMIT = 3000;
++  const diagnosticSession = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
++  function diagnosticValue(value) {
++    if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
++    if (value === undefined) return null;
++    try { JSON.stringify(value); return value; } catch (_) { return String(value); }
++  }
++  function readDiagnostics() {
++    try {
++      const value = JSON.parse(localStorage.getItem(DIAGNOSTIC_KEY) || '[]');
++      return Array.isArray(value) ? value : [];
++    } catch (_) { return []; }
++  }
++  const diagnosticCounters = Object.create(null);
++  function logDiagnostic(event, data = {}) {
++    diagnosticCounters[event] = (diagnosticCounters[event] || 0) + 1;
++    if ((event === 'click-emitted' || event === 'run-step') && diagnosticCounters[event] % 100 !== 1) return null;
++    if (event === 'status' && diagnosticCounters[event] % 20 !== 1) return null;
++    const entry = { ts: new Date().toISOString(), mono: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
++      session: diagnosticSession, appKey: state?.appKey || null, event, data: diagnosticValue(data) };
++    try {
++      const records = readDiagnostics();
++      records.push(entry);
++      localStorage.setItem(DIAGNOSTIC_KEY, JSON.stringify(records.slice(-DIAGNOSTIC_LIMIT)));
++    } catch (_) { /* 存储不可用时仍输出控制台日志。 */ }
++    try { console.debug('[CGCA]', entry); } catch (_) { /* 忽略控制台异常。 */ }
++    try {
++      if (window.parent !== window) window.parent.postMessage({ type: 'cgca-diagnostic-v1', event, appKey: entry.appKey, diagnostics: data }, 'https://start.qq.com');
++    } catch (_) { /* 跨域或沙箱限制不影响本地日志。 */ }
++    return entry;
++  }
++  function exportDiagnostics() {
++    const payload = JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), records: readDiagnostics() }, null, 2);
++    try {
++      const blob = new Blob([payload], { type: 'application/json' });
++      const link = document.createElement('a');
++      link.href = URL.createObjectURL(blob);
++      link.download = `cloud-game-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
++      link.click();
++      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
++    } catch (_) { try { navigator.clipboard?.writeText(payload); } catch (__) { /* 忽略导出失败。 */ } }
++    logDiagnostic('diagnostics-exported', { count: readDiagnostics().length });
++  }
+ 
+   function initAutomationUI() {
++    logDiagnostic('userscript-start', { href: window.location.href, visibility: document.visibilityState, online: navigator.onLine });
+     const APP_CONFIGS = {
+     jcc: {
+       name: '金铲铲',
+@@ -75,6 +120,7 @@
+   }
+ 
+   function saveRunIntent(interval, loops) {
++    logDiagnostic('run-intent-save', { interval, loops });
+     try {
+       sessionStorage.setItem(RUN_STATE_KEY, JSON.stringify({
+         appKey: state.appKey,
+@@ -86,6 +132,7 @@
+   }
+ 
+   function clearRunIntent() {
++    logDiagnostic('run-intent-clear');
+     try { sessionStorage.removeItem(RUN_STATE_KEY); } catch (_) { /* 忽略存储异常。 */ }
+   }
+ 
+@@ -109,6 +156,7 @@
+       </div>
+       <div class="cgca-row">
+         <button data-action="clear">清空坐标</button>
++        <button data-action="export-diagnostics">导出日志</button>
+         <button data-action="export">导出</button>
+         <button data-action="import">导入</button>
+       </div>
+@@ -199,7 +247,7 @@
+     localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+   }
+ 
+-  function setStatus(text) { statusEl.textContent = text; }
++  function setStatus(text) { statusEl.textContent = text; logDiagnostic('status', { text }); }
+ 
+   function syncAppFromUrl() {
+     const appKey = detectAppKey();
+@@ -330,6 +378,7 @@
+ 
+   function emitClick(point) {
+     const { x, y } = eventPosition(point);
++    logDiagnostic('click-emitted', { point, x: Math.round(x), y: Math.round(y) });
+     const target = document.elementFromPoint(x, y) || getSurface() || document.body;
+     const options = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, screenX: x, screenY: y, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+     for (const type of ['pointermove', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+@@ -359,6 +408,7 @@
+   }
+ 
+   async function run() {
++    logDiagnostic('run-request', { running: state.running, points: state.points.length, interval: intervalEl.value, loops: loopsEl.value });
+     if (state.running || !state.points.length) {
+       if (!state.points.length) setStatus('还没有坐标，请先点击“记录”。');
+       return;
+@@ -377,6 +427,7 @@
+         for (let index = 0; index < points.length; index += 1) {
+           if (state.stopRequested) break;
+           setActiveMarker(index);
++          logDiagnostic('run-step', { loop: completed + 1, index, total: points.length });
+           emitClick(points[index]);
+           setStatus(state.loop === 0
+             ? `运行中 · 第 ${completed + 1} 轮 · 坐标 ${index + 1}/${points.length}`
+@@ -393,10 +444,12 @@
+       setActiveMarker(-1);
+       updateRunningUI();
+       setStatus(wasStopped ? `已停止 · 已完成 ${completed} 轮` : `运行完成 · 共 ${completed} 轮`);
++      logDiagnostic('run-finished', { stopped: wasStopped, completed });
+     }
+   }
+ 
+   function stop() {
++    logDiagnostic('stop-request', { running: state.running });
+     if (!state.running) {
+       clearRunIntent();
+       return;
+@@ -408,7 +461,9 @@
+ 
+   document.addEventListener('pointerdown', (event) => {
+     if (!state.recording || panel.contains(event.target)) return;
+-    state.points.push(pointFromEvent(event));
++    const point = pointFromEvent(event);
++    state.points.push(point);
++    logDiagnostic('point-recorded', { index: state.points.length - 1, point });
+     savePoints();
+     renderList();
+     setStatus(`已记录第 ${state.points.length} 个坐标，继续点击可继续记录。`);
+@@ -425,6 +480,7 @@
+     else if (action === 'stop') stop();
+     else if (action === 'clear') { stop(); state.points = []; savePoints(); renderList(); setStatus('坐标已清空。'); }
+     else if (action === 'minimize') panel.classList.toggle('cgca-collapsed');
++    else if (action === 'export-diagnostics') exportDiagnostics();
+     else if (action === 'export') {
+       navigator.clipboard?.writeText(JSON.stringify(state.points));
+       setStatus('坐标 JSON 已复制，可保存到其他页面。');
+@@ -467,6 +523,16 @@
+       positionMarkers();
+     });
+   };
++  window.addEventListener('error', (event) => logDiagnostic('window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
++  window.addEventListener('unhandledrejection', (event) => logDiagnostic('unhandled-rejection', { reason: event.reason }));
++  window.addEventListener('offline', () => logDiagnostic('network-offline'));
++  window.addEventListener('online', () => logDiagnostic('network-online'));
++  document.addEventListener('visibilitychange', () => logDiagnostic('visibility-change', { visibility: document.visibilityState }));
++  window.addEventListener('pagehide', () => logDiagnostic('page-hide'));
++  window.addEventListener('pageshow', (event) => logDiagnostic('page-show', { persisted: event.persisted }));
++  if (typeof PerformanceObserver !== 'undefined') {
++    try { new PerformanceObserver((list) => list.getEntries().forEach((entry) => logDiagnostic('long-task', { duration: Math.round(entry.duration), startTime: Math.round(entry.startTime) }))).observe({ type: 'longtask', buffered: true }); } catch (_) { /* 忽略不支持的浏览器。 */ }
++  }
+   window.addEventListener('resize', refreshMarkers, { passive: true });
+   window.addEventListener('scroll', refreshMarkers, { passive: true, capture: true });
+   setInterval(positionMarkers, 500);
+@@ -478,14 +544,18 @@
+     window.addEventListener('popstate', syncAppFromUrl);
+     setInterval(syncAppFromUrl, 2000);
+ 
++    logDiagnostic('ui-ready', { points: state.points.length });
+     const runIntent = loadRunIntent();
+     if (runIntent) {
++      logDiagnostic('run-intent-found', runIntent);
+       intervalEl.value = String(runIntent.interval);
+       loopsEl.value = String(runIntent.loops);
+       setStatus('连接恢复后准备继续运行…');
+       setTimeout(async () => {
+         if (!loadRunIntent() || state.running) return;
+-        if (await waitForSurface() && loadRunIntent()) run();
++        const surfaceReady = await waitForSurface();
++        logDiagnostic('surface-wait-finished', { surfaceReady, runIntent: Boolean(loadRunIntent()) });
++        if (surfaceReady && loadRunIntent()) run();
+       }, 1000);
+     } else {
+       clearRunIntent();
