@@ -207,7 +207,7 @@
         </div>
         <div class="app-picker">
           <button type="button" data-action="toggle-diagnostics">开始记录日志</button>
-          <span data-role="diagnostic-status" aria-live="polite">日志未记录</span>
+          <span data-role="diagnostic-status" aria-live="polite">故障日志自动保留</span>
           <button type="button" data-action="export-diagnostics">导出诊断日志</button>
           <label for="app-select">应用</label>
           <select id="app-select" aria-label="选择应用">
@@ -247,22 +247,85 @@
       const appSelect = document.querySelector('#app-select');
       const windowGrid = document.querySelector('.window-grid');
       const windows = [...document.querySelectorAll('.game-window')];
+      let currentAppKey = appSelect.value;
       let currentApp = APPS[appSelect.value];
 
       // 持久化诊断日志：刷新后仍保留，用于分析长时间运行后的卡顿。
       const DIAGNOSTIC_KEY = 'cloud-game-click-diagnostics-v1';
       const DIAGNOSTIC_LIMIT = 2000;
+      const IMPORTANT_DIAGNOSTIC_KEY = 'cloud-game-click-incidents-v1';
+      const IMPORTANT_DIAGNOSTIC_LIMIT = 200;
+      const SCRIPT_VERSION = '1.7.1';
       const diagnosticSession = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      let importantSequence = 0;
+      function safeDiagnosticData(value, depth = 0, seen = new WeakSet()) {
+        if (depth > 7) return '[truncated]';
+        if (value == null || typeof value === 'boolean') return value;
+        if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
+        if (typeof value === 'string') return value.slice(0, 4000).replace(/https?:\/\/[^\s"'<>]+/g, (text) => {
+          try { const url = new URL(text); return `${url.origin}${url.pathname}`; } catch (_) { return '[url]'; }
+        }).replace(/\bBearer\s+[a-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]')
+          .replace(/\b(access[_-]?token|refresh[_-]?token|password|cookie|credential|secret|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]');
+        if (value instanceof Error || (typeof value === 'object' && typeof value.message === 'string' && typeof value.name === 'string')) {
+          return { name: safeDiagnosticData(value.name, depth + 1, seen),
+            message: safeDiagnosticData(value.message, depth + 1, seen),
+            stack: safeDiagnosticData(value.stack, depth + 1, seen) };
+        }
+        if (typeof value !== 'object') return String(value).slice(0, 4000);
+        if (seen.has(value)) return '[circular]';
+        seen.add(value);
+        if (Array.isArray(value)) return value.slice(0, 50).map((item) => safeDiagnosticData(item, depth + 1, seen));
+        const result = {};
+        for (const [key, item] of Object.entries(value).slice(0, 50)) {
+          result[key] = /token|password|auth|cookie|credential|secret|sdp/i.test(key)
+            ? '[redacted]' : safeDiagnosticData(item, depth + 1, seen);
+        }
+        return result;
+      }
       function diagnosticValue(value) {
-        if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
         if (value === undefined) return null;
-        try { JSON.stringify(value); return value; } catch (_) { return String(value); }
+        try { return safeDiagnosticData(value); } catch (_) { return '[unavailable]'; }
       }
       function readDiagnostics() {
         try {
           const value = JSON.parse(localStorage.getItem(DIAGNOSTIC_KEY) || '[]');
           return Array.isArray(value) ? value : [];
         } catch (_) { return []; }
+      }
+      let importantDiagnostics = [];
+      try {
+        const value = JSON.parse(localStorage.getItem(IMPORTANT_DIAGNOSTIC_KEY) || '[]');
+        if (Array.isArray(value)) importantDiagnostics = value.filter((record) => record && typeof record === 'object').slice(-IMPORTANT_DIAGNOSTIC_LIMIT);
+      } catch (_) { /* 存储不可用时仍在内存中保存故障记录。 */ }
+      function readImportantDiagnostics() {
+        try {
+          const saved = JSON.parse(localStorage.getItem(IMPORTANT_DIAGNOSTIC_KEY) || '[]');
+          if (Array.isArray(saved)) {
+            const merged = new Map();
+            for (const record of [...saved, ...importantDiagnostics]) {
+              if (record && typeof record === 'object') merged.set(`${record.source}:${record.id}`, record);
+            }
+            importantDiagnostics = [...merged.values()].sort((left, right) =>
+              (Date.parse(left.ts) || 0) - (Date.parse(right.ts) || 0)).slice(-IMPORTANT_DIAGNOSTIC_LIMIT);
+          }
+        } catch (_) {}
+        return importantDiagnostics.slice();
+      }
+      function keepImportantDiagnostic(entry) {
+        readImportantDiagnostics();
+        if (importantDiagnostics.some((record) => record.id === entry.id && record.source === entry.source)) return null;
+        importantDiagnostics.push(entry);
+        importantDiagnostics = importantDiagnostics.slice(-IMPORTANT_DIAGNOSTIC_LIMIT);
+        try { localStorage.setItem(IMPORTANT_DIAGNOSTIC_KEY, JSON.stringify(importantDiagnostics)); } catch (_) {}
+        return entry;
+      }
+      function logImportantDiagnostic(event, data = {}) {
+        return keepImportantDiagnostic({
+          id: `${diagnosticSession}-page-${++importantSequence}`,
+          ts: new Date().toISOString(), mono: typeof performance !== 'undefined' ? Math.round(performance.now()) : null,
+          source: 'page', scriptVersion: SCRIPT_VERSION, session: diagnosticSession, appKey: currentAppKey,
+          event, data: diagnosticValue({ visibility: document.visibilityState, online: navigator.onLine, ...data }),
+        });
       }
       const DIAGNOSTIC_ENABLED_KEY = 'cloud-game-click-diagnostics-enabled-v1';
       let diagnosticsEnabled = false;
@@ -274,7 +337,7 @@
         const button = document.querySelector('[data-action="toggle-diagnostics"]');
         const status = document.querySelector('[data-role="diagnostic-status"]');
         if (button) button.textContent = diagnosticsEnabled ? '停止记录日志' : '开始记录日志';
-        if (status) { status.textContent = diagnosticsEnabled ? '● 日志记录中' : '日志未记录'; status.setAttribute('style', diagnosticsEnabled ? 'color:#7cf0a0' : 'color:#91a6bc'); }
+        if (status) { status.textContent = diagnosticsEnabled ? '● 详细日志记录中 · 故障自动保留' : '故障日志自动保留'; status.setAttribute('style', diagnosticsEnabled ? 'color:#7cf0a0' : 'color:#91a6bc'); }
       }
       function setDiagnosticsEnabled(enabled) {
         if (diagnosticsEnabled && !enabled) logDiagnostic('recording-stopped');
@@ -300,7 +363,18 @@
         return entry;
       }
       function exportDiagnostics() {
-        const payload = JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), records: readDiagnostics() }, null, 2);
+        const payload = JSON.stringify({ version: 2, exportedAt: new Date().toISOString(), source: 'page',
+          scriptVersion: SCRIPT_VERSION, session: diagnosticSession, recording: diagnosticsEnabled,
+          retention: { records: DIAGNOSTIC_LIMIT, importantRecords: IMPORTANT_DIAGNOSTIC_LIMIT, importantAlwaysOn: true },
+          environment: { userAgent: navigator.userAgent || null, platform: navigator.platform || null,
+            visibility: document.visibilityState, online: navigator.onLine },
+          streams: windows.map((item) => { const state = streamStates.get(item); return {
+            appKey: currentAppKey, generation: state.generation, iframeSession: state.session,
+            loaded: state.loaded, status: state.lastHealthStatus, recoveryAttempts: state.recoveryTimes.length,
+            lastHealthAt: state.lastHealthAt, lastHealthAgeMs: state.lastHealthAt === null ? null : Math.max(0, Date.now() - state.lastHealthAt),
+            pendingRecovery: state.pendingRecovery, currentEvidence: state.lastEvidence,
+          }; }), records: readDiagnostics().map((record) => diagnosticValue(record)),
+          importantRecords: readImportantDiagnostics().map((record) => diagnosticValue(record)) }, null, 2);
         try {
           const blob = new Blob([payload], { type: 'application/json' });
           const link = document.createElement('a');
@@ -311,32 +385,180 @@
         } catch (_) { try { navigator.clipboard?.writeText(payload); } catch (__) { /* 忽略导出失败。 */ } }
         logDiagnostic('diagnostics-exported', { count: readDiagnostics().length });
       }
-      window.__CGCA_DIAGNOSTICS = { log: logDiagnostic, read: readDiagnostics, export: exportDiagnostics };
+      window.__CGCA_DIAGNOSTICS = { log: logDiagnostic, read: readDiagnostics,
+        logImportant: logImportantDiagnostic, readImportant: readImportantDiagnostics, export: exportDiagnostics };
       logDiagnostic('page-start', { href: window.location?.href || null, visibility: document.visibilityState, online: navigator.onLine });
 
-      function createFrameUrl() {
+      function createFrameUrl(generation) {
         const url = new URL(currentApp.url);
         url.searchParams.set('_reconnect', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+        url.searchParams.set('_cgca_generation', generation);
         return url.toString();
+      }
+
+      // 每次 iframe 导航重新握手，避免沿用 WindowProxy 的旧消息触发重连。
+      const STREAM_RECOVERY_LIMIT = 3;
+      const STREAM_RECOVERY_WINDOW_MS = 10 * 60 * 1000;
+      const STREAM_RECOVERY_COOLDOWN_MS = 60 * 1000;
+      const streamStates = new Map(windows.map((item) => [item, {
+        generation: null, session: null, loaded: false, recoveryTimes: [], lastRecovery: -Infinity,
+        lastHealthStatus: null, lastHealthLogAt: -Infinity, lastHealthAt: null, lastEvidence: null,
+        lastDeferredDecision: null, pendingRecovery: null,
+      }]));
+      function resetStreamRecovery(gameWindow) {
+        const state = streamStates.get(gameWindow);
+        state.recoveryTimes = [];
+        state.lastRecovery = -Infinity;
+        state.lastDeferredDecision = null;
+      }
+      function sendStreamControl(gameWindow) {
+        const state = streamStates.get(gameWindow);
+        if (!state.loaded || !state.generation) return;
+        gameWindow.querySelector('iframe').contentWindow?.postMessage?.({
+          type: 'cgca-stream-control-v1', generation: state.generation, appKey: currentAppKey,
+        }, 'https://start.qq.com');
+      }
+      function handleStreamHealth(gameWindow, data) {
+        const state = streamStates.get(gameWindow);
+        const statuses = ['healthy', 'suspect', 'recovering', 'unobserved', 'suspended'];
+        if (!state.loaded || data.generation !== state.generation || data.appKey !== currentAppKey
+          || typeof data.session !== 'string' || !data.session || data.session.length > 200
+          || !statuses.includes(data.status) || typeof data.requestRecovery !== 'boolean'
+          || (data.reason !== null && (typeof data.reason !== 'string' || data.reason.length > 200))) return;
+        if (!state.session) {
+          // 先接受正常遥测建立关联，拒绝把第一次消息直接当作刷新请求。
+          if (data.requestRecovery) return;
+          state.session = data.session;
+        }
+        if (data.session !== state.session) return;
+        const label = gameWindow.querySelector('.window-state');
+        const labels = {
+          healthy: '画面正常', suspect: '画面疑似停滞，正在检测...', recovering: '正在尝试恢复画面...',
+          unobserved: '已加载，等待视频帧', suspended: '画面监测已暂停',
+        };
+        label.textContent = labels[data.status];
+        const now = Date.now();
+        state.lastHealthAt = now;
+        state.lastEvidence = diagnosticValue(data.evidence);
+        if (data.status === 'healthy' && state.pendingRecovery) {
+          const pending = state.pendingRecovery;
+          logImportantDiagnostic('host-recovery-outcome', {
+            previousGeneration: pending.generation, previousSession: pending.session,
+            newGeneration: state.generation, newSession: state.session,
+            recoveryDurationMs: Math.max(0, now - pending.startedAt), attempt: pending.attempt,
+            result: 'frames-resumed', evidence: data.evidence, appKey: pending.appKey, sourceIncidentId: pending.sourceIncidentId,
+          });
+          state.pendingRecovery = null;
+        }
+        if (state.lastHealthStatus !== data.status || now - state.lastHealthLogAt >= 30000) {
+          logDiagnostic('stream-health', { appKey: data.appKey, generation: state.generation, session: data.session,
+            status: data.status, reason: data.reason, evidence: data.evidence, requestRecovery: data.requestRecovery });
+          state.lastHealthStatus = data.status;
+          state.lastHealthLogAt = now;
+        }
+        if (!data.requestRecovery) return;
+        // 只刷新已经持续停帧且经过软恢复等待的连接；断网/后台不消耗预算。
+        const evidence = data.evidence;
+        if (data.status !== 'recovering' || !data.reason || !evidence || typeof evidence !== 'object'
+          || !Number.isFinite(evidence.staleForMs) || evidence.staleForMs < 30000
+          || !Number.isFinite(evidence.softRecoveryWaitMs) || evidence.softRecoveryWaitMs < 10000) return;
+        state.recoveryTimes = state.recoveryTimes.filter((at) => now - at < STREAM_RECOVERY_WINDOW_MS);
+        const decision = (deferReason = null) => {
+          if (deferReason) {
+            const signature = `${state.generation}:${state.session}:${deferReason}`;
+            if (state.lastDeferredDecision?.signature === signature && now - state.lastDeferredDecision.at < 30000) return;
+            state.lastDeferredDecision = { signature, at: now };
+          } else state.lastDeferredDecision = null;
+          logImportantDiagnostic('host-recovery-decision', {
+            generation: state.generation, iframeSession: state.session, reason: data.reason, evidence,
+            attempt: state.recoveryTimes.length + 1, decision: deferReason ? 'defer' : 'reconnect', deferReason,
+            cooldownRemainingMs: Math.max(0, STREAM_RECOVERY_COOLDOWN_MS - (now - state.lastRecovery)),
+            retryLimit: STREAM_RECOVERY_LIMIT, retryWindowMs: STREAM_RECOVERY_WINDOW_MS,
+            sourceIncidentId: typeof data.incidentId === 'string' ? data.incidentId.slice(0, 200) : null,
+          });
+        };
+        if (document.hidden || navigator.onLine === false) {
+          label.textContent = document.hidden ? '后台已暂停画面恢复' : '网络离线，等待恢复';
+          decision(document.hidden ? 'hidden' : 'offline');
+          logDiagnostic('stream-recovery-deferred', { reason: document.hidden ? 'hidden' : 'offline' });
+          return;
+        }
+        if (state.recoveryTimes.length >= STREAM_RECOVERY_LIMIT) {
+          label.textContent = '画面仍停滞，请手动重新连接';
+          decision('retry-limit');
+          logDiagnostic('stream-recovery-deferred', { reason: 'retry-limit', attempts: state.recoveryTimes.length });
+          return;
+        }
+        if (now - state.lastRecovery < STREAM_RECOVERY_COOLDOWN_MS) {
+          label.textContent = '画面仍停滞，等待重连冷却';
+          decision('cooldown');
+          logDiagnostic('stream-recovery-deferred', { reason: 'cooldown' });
+          return;
+        }
+        decision();
+        if (state.pendingRecovery) {
+          const pending = state.pendingRecovery;
+          logImportantDiagnostic('host-recovery-outcome', {
+            previousGeneration: pending.generation, previousSession: pending.session,
+            newGeneration: state.generation, newSession: state.session,
+            recoveryDurationMs: Math.max(0, now - pending.startedAt), attempt: pending.attempt,
+            result: 'stalled-again', reason: data.reason, evidence, appKey: pending.appKey, sourceIncidentId: pending.sourceIncidentId,
+          });
+        }
+        state.recoveryTimes.push(now);
+        state.lastRecovery = now;
+        state.pendingRecovery = { generation: state.generation, session: state.session,
+          startedAt: now, attempt: state.recoveryTimes.length, appKey: currentAppKey,
+          sourceIncidentId: typeof data.incidentId === 'string' ? data.incidentId.slice(0, 200) : null };
+        logDiagnostic('stream-recovery-reconnect', { reason: data.reason, evidence, attempt: state.recoveryTimes.length });
+        loadFrame(gameWindow, 'stream-recovery');
       }
 
       function loadFrame(gameWindow, reason = 'initial') {
         const frame = gameWindow.querySelector('iframe');
+        const streamState = streamStates.get(gameWindow);
+        const previousGeneration = streamState.generation;
+        const previousSession = streamState.session;
+        if (reason !== 'stream-recovery' && streamState.pendingRecovery) {
+          const pending = streamState.pendingRecovery;
+          logImportantDiagnostic('host-recovery-outcome', {
+            previousGeneration: pending.generation, previousSession: pending.session,
+            newGeneration: previousGeneration, newSession: previousSession,
+            recoveryDurationMs: Math.max(0, Date.now() - pending.startedAt), attempt: pending.attempt,
+            result: 'superseded', reason, appKey: pending.appKey, sourceIncidentId: pending.sourceIncidentId,
+          });
+          streamState.pendingRecovery = null;
+        }
+        streamState.loaded = false;
+        streamState.generation = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        streamState.session = null;
+        streamState.lastHealthStatus = null;
+        streamState.lastHealthLogAt = -Infinity;
+        streamState.lastHealthAt = null;
+        streamState.lastEvidence = null;
+        streamState.lastDeferredDecision = null;
+        logImportantDiagnostic('host-frame-navigation', {
+          reason, generation: streamState.generation, iframeSession: null, previousGeneration, previousSession,
+        });
         logDiagnostic('iframe-load-request', { reason, previousSrc: frame.src || null });
         gameWindow.querySelector('.window-state').textContent = reason === 'initial'
           ? '加载中...'
           : '正在重新连接...';
-        frame.src = createFrameUrl();
+        frame.src = createFrameUrl(streamState.generation);
       }
 
       function reconnect() {
         logDiagnostic('manual-reconnect', { windows: windows.length });
-        windows.forEach((gameWindow) => loadFrame(gameWindow, 'reconnect'));
+        windows.forEach((gameWindow) => {
+          resetStreamRecovery(gameWindow);
+          loadFrame(gameWindow, 'reconnect');
+        });
       }
 
       function selectApp(appKey) {
         const app = APPS[appKey];
         if (!app || app === currentApp) return;
+        currentAppKey = appKey;
         currentApp = app;
         document.title = app.name;
         document.querySelector('h1').textContent = app.name;
@@ -344,6 +566,7 @@
         windows.forEach((gameWindow) => {
           gameWindow.querySelector('[data-role="window-title"]').textContent = app.name;
           gameWindow.querySelector('iframe').title = app.name;
+          resetStreamRecovery(gameWindow);
           loadFrame(gameWindow);
         });
       }
@@ -357,15 +580,56 @@
       document.querySelector('[data-action="export-diagnostics"]')?.addEventListener('click', exportDiagnostics);
       document.querySelector('[data-action="toggle-diagnostics"]')?.addEventListener('click', () => setDiagnosticsEnabled(!diagnosticsEnabled));
       updateDiagnosticControls();
-      window.addEventListener('error', (event) => logDiagnostic('window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
-      window.addEventListener('unhandledrejection', (event) => logDiagnostic('unhandled-rejection', { reason: event.reason }));
-      window.addEventListener('offline', () => logDiagnostic('network-offline'));
-      window.addEventListener('online', () => logDiagnostic('network-online'));
-      document.addEventListener('visibilitychange', () => logDiagnostic('visibility-change', { visibility: document.visibilityState }));
-      window.addEventListener('pagehide', () => logDiagnostic('page-hide'));
-      window.addEventListener('pageshow', (event) => logDiagnostic('page-show', { persisted: event.persisted }));
+      function logPageIncident(event, data = {}) {
+        const states = windows.map((item) => { const state = streamStates.get(item); return {
+          generation: state.generation, iframeSession: state.session, loaded: state.loaded,
+        }; });
+        logImportantDiagnostic(event, { ...data, streams: states });
+        logDiagnostic(event, data);
+      }
+      window.addEventListener('error', (event) => logPageIncident('window-error', { message: event.message, filename: event.filename, line: event.lineno, column: event.colno, error: event.error }));
+      window.addEventListener('unhandledrejection', (event) => logPageIncident('unhandled-rejection', { reason: event.reason }));
+      window.addEventListener('offline', () => logPageIncident('network-offline'));
+      window.addEventListener('online', () => logPageIncident('network-online'));
+      document.addEventListener('visibilitychange', () => logPageIncident('visibility-change', { visibility: document.visibilityState }));
+      window.addEventListener('pagehide', () => logPageIncident('page-hide'));
+      window.addEventListener('pageshow', (event) => logPageIncident('page-show', { persisted: event.persisted }));
       window.addEventListener('message', (event) => {
-        if (event.origin !== 'https://start.qq.com' || !windows.some((item) => item.querySelector('iframe').contentWindow === event.source)) return;
+        if (event.origin !== 'https://start.qq.com') return;
+        const gameWindow = windows.find((item) => item.querySelector('iframe').contentWindow === event.source);
+        if (!gameWindow) return;
+        if (event.data?.type === 'cgca-stream-ready-v1') {
+          const state = streamStates.get(gameWindow);
+          if (event.data.appKey === currentAppKey
+            && (!event.data.generation || event.data.generation === state.generation)) sendStreamControl(gameWindow);
+          return;
+        }
+        if (event.data?.type === 'cgca-stream-health-v1') {
+          handleStreamHealth(gameWindow, event.data);
+          return;
+        }
+        if (event.data?.type === 'cgca-incident-v1') {
+          const record = event.data.record;
+          const state = streamStates.get(gameWindow);
+          if (!record || typeof record !== 'object' || Array.isArray(record)
+            || record.source !== 'userscript' || record.appKey !== currentAppKey
+            || typeof record.id !== 'string' || !record.id || record.id.length > 200
+            || typeof record.ts !== 'string' || record.ts.length > 100 || !Number.isFinite(Date.parse(record.ts))
+            || (record.mono !== null && (!Number.isFinite(record.mono) || record.mono < 0))
+            || typeof record.session !== 'string' || !record.session || record.session.length > 200
+            || typeof record.scriptVersion !== 'string' || !record.scriptVersion || record.scriptVersion.length > 50
+            || typeof record.event !== 'string' || !record.event || record.event.length > 200
+            || !record.data || typeof record.data !== 'object' || Array.isArray(record.data)
+            || !state.generation || record.data.generation !== state.generation
+            || (state.session && record.session !== state.session)) return;
+          // 保留源时钟/会话/记录 ID，让 iframe 重建前后的证据仍可以关联。
+          keepImportantDiagnostic({
+            id: record.id, ts: record.ts, mono: record.mono, source: record.source,
+            scriptVersion: record.scriptVersion, session: record.session, appKey: record.appKey,
+            event: record.event, data: diagnosticValue(record.data),
+          });
+          return;
+        }
         if (event.data?.type === 'cgca-diagnostic-status-v1') {
           if (typeof event.data.recording === 'boolean' && diagnosticsEnabled !== event.data.recording) { diagnosticsEnabled = event.data.recording; try { localStorage.setItem(DIAGNOSTIC_ENABLED_KEY, String(diagnosticsEnabled)); } catch (_) {} updateDiagnosticControls(); }
           return;
@@ -375,7 +639,11 @@
       });
       if (typeof PerformanceObserver !== 'undefined') {
         try {
-          new PerformanceObserver((list) => list.getEntries().forEach((entry) => logDiagnostic('long-task', { duration: Math.round(entry.duration), startTime: Math.round(entry.startTime) }))).observe({ type: 'longtask', buffered: true });
+          new PerformanceObserver((list) => list.getEntries().forEach((entry) => {
+            const data = { duration: Math.round(entry.duration), startTime: Math.round(entry.startTime) };
+            if (entry.duration > 1000) logPageIncident('long-task', data);
+            else logDiagnostic('long-task', data);
+          })).observe({ type: 'longtask', buffered: true });
         } catch (_) { /* 浏览器不支持 longtask 时使用事件循环哨兵。 */ }
       }
       if (typeof performance !== 'undefined' && typeof setInterval === 'function') {
@@ -384,18 +652,26 @@
           const now = Date.now();
           const delay = now - watchdogAt - 10000;
           watchdogAt = now;
-          logDiagnostic('watchdog', { delayMs: Math.max(0, delay), visibility: document.visibilityState, online: navigator.onLine, iframeSrc: windows[0]?.querySelector('iframe')?.src || null });
+          const data = { delayMs: Math.max(0, delay), visibility: document.visibilityState, online: navigator.onLine,
+            iframeSrc: windows[0]?.querySelector('iframe')?.src || null };
+          if (delay > 1000) logPageIncident('watchdog-delayed', data);
+          logDiagnostic('watchdog', data);
         }, 10000);
       }
 
       windows.forEach((gameWindow) => {
         const frame = gameWindow.querySelector('iframe');
         frame.addEventListener('load', () => {
+          const streamState = streamStates.get(gameWindow);
+          streamState.loaded = true;
+          streamState.session = null;
           gameWindow.querySelector('.window-state').textContent = '已加载';
           logDiagnostic('iframe-load', { src: frame.src || null });
+          sendStreamControl(gameWindow);
           syncDiagnosticsToFrames();
         });
-        frame.addEventListener('error', (event) => logDiagnostic('iframe-error', { src: frame.src || null, error: event.error || null }));
+        frame.addEventListener('error', (event) => logPageIncident('iframe-error', { generation: streamStates.get(gameWindow).generation,
+          iframeSession: streamStates.get(gameWindow).session, error: event.error || null }));
         loadFrame(gameWindow);
       });
     </script>
