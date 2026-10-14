@@ -223,7 +223,7 @@
             <div class="window-bar">
               <div class="window-label"><span class="window-dot"></span><span data-role="window-title">金铲铲自动对战</span><span class="window-state">加载中...</span></div>
               <div class="window-actions">
-                <button type="button" data-action="reconnect">重新连接</button>
+                <button type="button" data-action="repair">修复连接</button>
               </div>
             </div>
             <iframe title="金铲铲自动对战" loading="eager" allow="autoplay; fullscreen; clipboard-read; clipboard-write"></iframe>
@@ -255,7 +255,7 @@
       const DIAGNOSTIC_LIMIT = 2000;
       const IMPORTANT_DIAGNOSTIC_KEY = 'cloud-game-click-incidents-v1';
       const IMPORTANT_DIAGNOSTIC_LIMIT = 200;
-      const SCRIPT_VERSION = '1.7.1';
+      const SCRIPT_VERSION = '1.8.0';
       const diagnosticSession = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       let importantSequence = 0;
       function safeDiagnosticData(value, depth = 0, seen = new WeakSet()) {
@@ -370,9 +370,9 @@
             visibility: document.visibilityState, online: navigator.onLine },
           streams: windows.map((item) => { const state = streamStates.get(item); return {
             appKey: currentAppKey, generation: state.generation, iframeSession: state.session,
-            loaded: state.loaded, status: state.lastHealthStatus, recoveryAttempts: state.recoveryTimes.length,
+            loaded: state.loaded, status: state.lastHealthStatus, loginState: 'unverified',
             lastHealthAt: state.lastHealthAt, lastHealthAgeMs: state.lastHealthAt === null ? null : Math.max(0, Date.now() - state.lastHealthAt),
-            pendingRecovery: state.pendingRecovery, currentEvidence: state.lastEvidence,
+            pendingInPageRecovery: state.inPageRecovery, currentEvidence: state.lastEvidence,
           }; }), records: readDiagnostics().map((record) => diagnosticValue(record)),
           importantRecords: readImportantDiagnostics().map((record) => diagnosticValue(record)) }, null, 2);
         try {
@@ -397,19 +397,41 @@
       }
 
       // 每次 iframe 导航重新握手，避免沿用 WindowProxy 的旧消息触发重连。
-      const STREAM_RECOVERY_LIMIT = 3;
-      const STREAM_RECOVERY_WINDOW_MS = 10 * 60 * 1000;
-      const STREAM_RECOVERY_COOLDOWN_MS = 60 * 1000;
       const streamStates = new Map(windows.map((item) => [item, {
-        generation: null, session: null, loaded: false, recoveryTimes: [], lastRecovery: -Infinity,
+        generation: null, session: null, loaded: false,
         lastHealthStatus: null, lastHealthLogAt: -Infinity, lastHealthAt: null, lastEvidence: null,
-        lastDeferredDecision: null, pendingRecovery: null,
+        lastPreserveDecisionAt: -Infinity, inPageRecovery: null,
       }]));
-      function resetStreamRecovery(gameWindow) {
-        const state = streamStates.get(gameWindow);
-        state.recoveryTimes = [];
-        state.lastRecovery = -Infinity;
-        state.lastDeferredDecision = null;
+      function streamProgress(evidence) {
+        const progress = new Map();
+        if (!evidence || typeof evidence !== 'object') return progress;
+        for (const key of ['presentedFrames', 'canvasDraws']) {
+          if (Number.isFinite(evidence[key]) && evidence[key] >= 0) progress.set(key, evidence[key]);
+        }
+        if (Array.isArray(evidence.peers)) {
+          for (const peer of evidence.peers) {
+            if (!peer || (typeof peer.peer !== 'string' && typeof peer.peer !== 'number')) continue;
+            for (const key of ['framesDecoded', 'framesReceived']) {
+              if (Number.isFinite(peer[key]) && peer[key] >= 0) progress.set(`peer:${peer.peer}:${key}`, peer[key]);
+            }
+          }
+        }
+        return progress;
+      }
+      function hasStreamProgressSince(baseline, evidence) {
+        const current = streamProgress(evidence);
+        for (const [key, value] of baseline) {
+          if (current.has(key) && current.get(key) > value) return true;
+        }
+        return false;
+      }
+      function beginInPageRecovery(state, data = {}, force = false) {
+        if (state.inPageRecovery && !force) return;
+        state.inPageRecovery = {
+          generation: state.generation, session: state.session, startedAt: Date.now(), appKey: currentAppKey,
+          sourceIncidentId: typeof data.incidentId === 'string' ? data.incidentId.slice(0, 200) : null,
+          baseline: Object.fromEntries(streamProgress(data.evidence)),
+        };
       }
       function sendStreamControl(gameWindow) {
         const state = streamStates.get(gameWindow);
@@ -420,7 +442,7 @@
       }
       function handleStreamHealth(gameWindow, data) {
         const state = streamStates.get(gameWindow);
-        const statuses = ['healthy', 'suspect', 'recovering', 'unobserved', 'suspended'];
+        const statuses = ['healthy', 'suspect', 'recovering', 'unobserved', 'suspended', 'blocked'];
         if (!state.loaded || data.generation !== state.generation || data.appKey !== currentAppKey
           || typeof data.session !== 'string' || !data.session || data.session.length > 200
           || !statuses.includes(data.status) || typeof data.requestRecovery !== 'boolean'
@@ -435,20 +457,34 @@
         const labels = {
           healthy: '画面正常', suspect: '画面疑似停滞，正在检测...', recovering: '正在尝试恢复画面...',
           unobserved: '已加载，等待视频帧', suspended: '画面监测已暂停',
+          blocked: '连接恢复失败，已保留原会话；可尝试修复连接',
         };
         label.textContent = labels[data.status];
+        if (data.status === 'healthy' && data.evidence?.loginCheckPending === true) {
+          label.textContent = '画面已恢复，请确认游戏登录后继续点击';
+        }
         const now = Date.now();
         state.lastHealthAt = now;
         state.lastEvidence = diagnosticValue(data.evidence);
-        if (data.status === 'healthy' && state.pendingRecovery) {
-          const pending = state.pendingRecovery;
-          logImportantDiagnostic('host-recovery-outcome', {
-            previousGeneration: pending.generation, previousSession: pending.session,
-            newGeneration: state.generation, newSession: state.session,
-            recoveryDurationMs: Math.max(0, now - pending.startedAt), attempt: pending.attempt,
-            result: 'frames-resumed', evidence: data.evidence, appKey: pending.appKey, sourceIncidentId: pending.sourceIncidentId,
-          });
-          state.pendingRecovery = null;
+        if (data.status === 'healthy' && state.inPageRecovery) {
+          const pending = state.inPageRecovery;
+          if (hasStreamProgressSince(new Map(Object.entries(pending.baseline || {})), data.evidence)) {
+            logImportantDiagnostic('host-recovery-outcome', {
+              previousGeneration: pending.generation, previousSession: pending.session,
+              newGeneration: state.generation, newSession: state.session,
+              recoveryDurationMs: Math.max(0, now - pending.startedAt), recoveryMode: 'in-page-soft',
+              result: 'frames-resumed', loginState: 'unverified', evidence: data.evidence,
+              appKey: pending.appKey, sourceIncidentId: pending.sourceIncidentId,
+            });
+            state.inPageRecovery = null;
+            label.textContent = data.evidence?.loginCheckPending === true
+              ? '画面已恢复，请确认游戏登录后继续点击' : '画面已恢复，登录状态待确认';
+          } else {
+            label.textContent = data.evidence?.loginCheckPending === true
+              ? '画面已恢复，登录状态待确认' : '画面正常，恢复结果待验证';
+          }
+        } else if ((data.status === 'blocked' || data.requestRecovery) && !state.inPageRecovery) {
+          beginInPageRecovery(state, data);
         }
         if (state.lastHealthStatus !== data.status || now - state.lastHealthLogAt >= 30000) {
           logDiagnostic('stream-health', { appKey: data.appKey, generation: state.generation, session: data.session,
@@ -456,62 +492,17 @@
           state.lastHealthStatus = data.status;
           state.lastHealthLogAt = now;
         }
-        if (!data.requestRecovery) return;
-        // 只刷新已经持续停帧且经过软恢复等待的连接；断网/后台不消耗预算。
-        const evidence = data.evidence;
-        if (data.status !== 'recovering' || !data.reason || !evidence || typeof evidence !== 'object'
-          || !Number.isFinite(evidence.staleForMs) || evidence.staleForMs < 30000
-          || !Number.isFinite(evidence.softRecoveryWaitMs) || evidence.softRecoveryWaitMs < 10000) return;
-        state.recoveryTimes = state.recoveryTimes.filter((at) => now - at < STREAM_RECOVERY_WINDOW_MS);
-        const decision = (deferReason = null) => {
-          if (deferReason) {
-            const signature = `${state.generation}:${state.session}:${deferReason}`;
-            if (state.lastDeferredDecision?.signature === signature && now - state.lastDeferredDecision.at < 30000) return;
-            state.lastDeferredDecision = { signature, at: now };
-          } else state.lastDeferredDecision = null;
+        if (!data.requestRecovery && data.status !== 'blocked') return;
+        // 包括旧版脚本的刷新请求也只记录、保留当前会话，绝不自动导航 iframe。
+        label.textContent = '连接恢复失败，已保留原会话；可尝试修复连接';
+        if (now - state.lastPreserveDecisionAt >= 30000) {
+          state.lastPreserveDecisionAt = now;
           logImportantDiagnostic('host-recovery-decision', {
-            generation: state.generation, iframeSession: state.session, reason: data.reason, evidence,
-            attempt: state.recoveryTimes.length + 1, decision: deferReason ? 'defer' : 'reconnect', deferReason,
-            cooldownRemainingMs: Math.max(0, STREAM_RECOVERY_COOLDOWN_MS - (now - state.lastRecovery)),
-            retryLimit: STREAM_RECOVERY_LIMIT, retryWindowMs: STREAM_RECOVERY_WINDOW_MS,
+            generation: state.generation, iframeSession: state.session, reason: data.reason, evidence: data.evidence,
+            decision: 'preserve-session', deferReason: 'manual-required', loginState: 'unverified',
             sourceIncidentId: typeof data.incidentId === 'string' ? data.incidentId.slice(0, 200) : null,
           });
-        };
-        if (document.hidden || navigator.onLine === false) {
-          label.textContent = document.hidden ? '后台已暂停画面恢复' : '网络离线，等待恢复';
-          decision(document.hidden ? 'hidden' : 'offline');
-          logDiagnostic('stream-recovery-deferred', { reason: document.hidden ? 'hidden' : 'offline' });
-          return;
         }
-        if (state.recoveryTimes.length >= STREAM_RECOVERY_LIMIT) {
-          label.textContent = '画面仍停滞，请手动重新连接';
-          decision('retry-limit');
-          logDiagnostic('stream-recovery-deferred', { reason: 'retry-limit', attempts: state.recoveryTimes.length });
-          return;
-        }
-        if (now - state.lastRecovery < STREAM_RECOVERY_COOLDOWN_MS) {
-          label.textContent = '画面仍停滞，等待重连冷却';
-          decision('cooldown');
-          logDiagnostic('stream-recovery-deferred', { reason: 'cooldown' });
-          return;
-        }
-        decision();
-        if (state.pendingRecovery) {
-          const pending = state.pendingRecovery;
-          logImportantDiagnostic('host-recovery-outcome', {
-            previousGeneration: pending.generation, previousSession: pending.session,
-            newGeneration: state.generation, newSession: state.session,
-            recoveryDurationMs: Math.max(0, now - pending.startedAt), attempt: pending.attempt,
-            result: 'stalled-again', reason: data.reason, evidence, appKey: pending.appKey, sourceIncidentId: pending.sourceIncidentId,
-          });
-        }
-        state.recoveryTimes.push(now);
-        state.lastRecovery = now;
-        state.pendingRecovery = { generation: state.generation, session: state.session,
-          startedAt: now, attempt: state.recoveryTimes.length, appKey: currentAppKey,
-          sourceIncidentId: typeof data.incidentId === 'string' ? data.incidentId.slice(0, 200) : null };
-        logDiagnostic('stream-recovery-reconnect', { reason: data.reason, evidence, attempt: state.recoveryTimes.length });
-        loadFrame(gameWindow, 'stream-recovery');
       }
 
       function loadFrame(gameWindow, reason = 'initial') {
@@ -519,15 +510,16 @@
         const streamState = streamStates.get(gameWindow);
         const previousGeneration = streamState.generation;
         const previousSession = streamState.session;
-        if (reason !== 'stream-recovery' && streamState.pendingRecovery) {
-          const pending = streamState.pendingRecovery;
+        if (streamState.inPageRecovery) {
+          const pending = streamState.inPageRecovery;
           logImportantDiagnostic('host-recovery-outcome', {
             previousGeneration: pending.generation, previousSession: pending.session,
             newGeneration: previousGeneration, newSession: previousSession,
-            recoveryDurationMs: Math.max(0, Date.now() - pending.startedAt), attempt: pending.attempt,
-            result: 'superseded', reason, appKey: pending.appKey, sourceIncidentId: pending.sourceIncidentId,
+            recoveryDurationMs: Math.max(0, Date.now() - pending.startedAt), recoveryMode: 'in-page-soft',
+            result: 'superseded-by-navigation', loginState: 'unverified', reason,
+            appKey: pending.appKey, sourceIncidentId: pending.sourceIncidentId,
           });
-          streamState.pendingRecovery = null;
+          streamState.inPageRecovery = null;
         }
         streamState.loaded = false;
         streamState.generation = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -536,23 +528,16 @@
         streamState.lastHealthLogAt = -Infinity;
         streamState.lastHealthAt = null;
         streamState.lastEvidence = null;
-        streamState.lastDeferredDecision = null;
+        streamState.lastPreserveDecisionAt = -Infinity;
         logImportantDiagnostic('host-frame-navigation', {
           reason, generation: streamState.generation, iframeSession: null, previousGeneration, previousSession,
+          loginState: 'unverified',
         });
         logDiagnostic('iframe-load-request', { reason, previousSrc: frame.src || null });
         gameWindow.querySelector('.window-state').textContent = reason === 'initial'
           ? '加载中...'
-          : '正在重新连接...';
+          : '正在切换应用...';
         frame.src = createFrameUrl(streamState.generation);
-      }
-
-      function reconnect() {
-        logDiagnostic('manual-reconnect', { windows: windows.length });
-        windows.forEach((gameWindow) => {
-          resetStreamRecovery(gameWindow);
-          loadFrame(gameWindow, 'reconnect');
-        });
       }
 
       function selectApp(appKey) {
@@ -566,17 +551,32 @@
         windows.forEach((gameWindow) => {
           gameWindow.querySelector('[data-role="window-title"]').textContent = app.name;
           gameWindow.querySelector('iframe').title = app.name;
-          resetStreamRecovery(gameWindow);
-          loadFrame(gameWindow);
+          loadFrame(gameWindow, 'app-change');
         });
       }
 
-      function manualReconnect() {
-        reconnect();
+      function manualRepair() {
+        windows.forEach((gameWindow) => {
+          const state = streamStates.get(gameWindow);
+          if (!state.loaded || !state.generation || !state.session) {
+            gameWindow.querySelector('.window-state').textContent = '正在等待连接，暂时无法修复';
+            return;
+          }
+          beginInPageRecovery(state, { incidentId: state.inPageRecovery?.sourceIncidentId,
+            evidence: state.lastEvidence }, true);
+          logImportantDiagnostic('host-recovery-decision', {
+            generation: state.generation, iframeSession: state.session, decision: 'in-page-repair',
+            trigger: 'manual', loginState: 'unverified',
+          });
+          gameWindow.querySelector('iframe').contentWindow?.postMessage?.({
+            type: 'cgca-stream-repair-v1', generation: state.generation, appKey: currentAppKey, session: state.session,
+          }, 'https://start.qq.com');
+          gameWindow.querySelector('.window-state').textContent = '正在修复连接，保留原会话...';
+        });
       }
 
       appSelect.addEventListener('change', () => { logDiagnostic('app-change', { appKey: appSelect.value }); selectApp(appSelect.value); });
-      document.querySelector('[data-action="reconnect"]').addEventListener('click', manualReconnect);
+      document.querySelector('[data-action="repair"]').addEventListener('click', manualRepair);
       document.querySelector('[data-action="export-diagnostics"]')?.addEventListener('click', exportDiagnostics);
       document.querySelector('[data-action="toggle-diagnostics"]')?.addEventListener('click', () => setDiagnosticsEnabled(!diagnosticsEnabled));
       updateDiagnosticControls();

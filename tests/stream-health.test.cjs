@@ -9,7 +9,7 @@ const vm = require('node:vm');
 const source = readFileSync(path.join(__dirname, '..', 'cloud-game-click-automation.user.js'), 'utf8');
 // Export private helpers only in the VM copy; the installed userscript exposes no test API.
 const instrumentedSource = source.replace("  if (document.readyState === 'loading') {",
-  "  window.__streamTest = { sample: sampleStreamHealth, state: streamState, log: logDiagnostic, important: logImportantDiagnostic, exportLogs: exportDiagnostics };\n  if (document.readyState === 'loading') {");
+  "  window.__streamTest = { sample: sampleStreamHealth, state: streamState, session: diagnosticSession, log: logDiagnostic, important: logImportantDiagnostic, exportLogs: exportDiagnostics };\n  if (document.readyState === 'loading') {");
 
 class FakeEventTarget {
   constructor(tagName = 'DIV') {
@@ -97,6 +97,7 @@ class FakeClock {
 
 function createGame({ loading = false, surface = 'video', hidden = false, online = true,
   recording = true, savedMap = new Map(), sessionMap = new Map(),
+  standalone = false,
   importedPoints = [{ x: 0.5, y: 0.5, global: false }] } = {}) {
   const clock = new FakeClock();
   const document = new FakeEventTarget();
@@ -115,11 +116,13 @@ function createGame({ loading = false, surface = 'video', hidden = false, online
   const messages = [];
   parent.postMessage = (data, origin) => messages.push({ at: clock.now, data, origin });
   const window = new FakeEventTarget();
-  window.parent = parent;
+  window.parent = standalone ? window : parent;
+  const reloads = [];
   window.location = {
     href: 'https://start.qq.com/game/arm-game/?_reconnect=test-generation&_cgca_generation=test-generation#/game/700967',
     pathname: '/game/arm-game/', hash: '#/game/700967', search: '?_reconnect=test-generation&_cgca_generation=test-generation',
     origin: 'https://start.qq.com',
+    reload: () => reloads.push(clock.now),
   };
   const saved = savedMap;
   saved.set('cloud-game-click-diagnostics-enabled-v1', String(recording));
@@ -210,14 +213,20 @@ function createGame({ loading = false, surface = 'video', hidden = false, online
       super(); this.connectionState = 'connected'; this.iceConnectionState = 'connected';
       this.signalingState = 'stable'; this.restartCalls = 0;
       this.reportId = 'video';
+      this.signalingCalls = [];
       this.framesReceived = 1; this.framesDecoded = 1; this.bytesReceived = 100;
+      this.track = { kind: 'video', readyState: 'live', enabled: true, muted: false };
     }
     getStats() {
       return Promise.resolve(new Map([[this.reportId, { id: this.reportId, type: 'inbound-rtp', kind: 'video',
         bytesReceived: this.bytesReceived, framesReceived: this.framesReceived, framesDecoded: this.framesDecoded }]]));
     }
-    getReceivers() { return [{ track: { kind: 'video', readyState: 'live', enabled: true, muted: false } }]; }
+    getReceivers() { return [{ track: this.track }]; }
     restartIce() { this.restartCalls += 1; }
+    createOffer(...args) { this.signalingCalls.push(['createOffer', ...args]); return Promise.resolve({ type: 'offer', sdp: 'native-test' }); }
+    setLocalDescription(...args) { this.signalingCalls.push(['setLocalDescription', ...args]); return Promise.resolve(); }
+    setRemoteDescription(...args) { this.signalingCalls.push(['setRemoteDescription', ...args]); return Promise.resolve(); }
+    addIceCandidate(...args) { this.signalingCalls.push(['addIceCandidate', ...args]); return Promise.resolve(); }
     close() { this.connectionState = 'closed'; this.iceConnectionState = 'closed'; this.dispatch('connectionstatechange'); }
     progress() { this.framesReceived += 1; this.framesDecoded += 1; this.bytesReceived += 100; }
   }
@@ -263,12 +272,17 @@ function createGame({ loading = false, surface = 'video', hidden = false, online
     panel().dispatch('click', { target });
   };
   return {
-    clock, context, document, navigator, window, parent, messages, video, canvas, saved, session, exportedPayloads, storageFailures,
+    clock, context, document, navigator, window, parent, messages, video, canvas, saved, session, exportedPayloads, storageFailures, reloads,
     NativePeerConnection, panel, click,
     sample: () => window.__streamTest.sample(),
     control(generation = 'test-generation') {
-      window.dispatch('message', { source: parent, origin: 'http://localhost:8000',
+      window.dispatch('message', { source: window.parent, origin: 'http://localhost:8000',
         data: { type: 'cgca-stream-control-v1', generation, appKey: 'jcc' } });
+    },
+    repair({ generation = 'test-generation', source = window.parent, appKey = 'jcc',
+      session: recoverySession = window.__streamTest.session } = {}) {
+      window.dispatch('message', { source, origin: 'http://localhost:8000',
+        data: { type: 'cgca-stream-repair-v1', generation, appKey, session: recoverySession } });
     },
     health() { return messages.filter(({ data }) => data.type === 'cgca-stream-health-v1').map(({ data }) => data); },
     recoveries() { return this.health().filter(({ requestRecovery }) => requestRecovery); },
@@ -337,10 +351,15 @@ test('disappearing game surface suspends clicks instead of targeting the viewpor
   game.showSurface();
   await game.clock.advance(400);
   const transitions = game.importantEvents('click-surface');
-  assert.equal(transitions.length, 2);
-  assert.equal(transitions[1].data.state, 'resumed');
-  assert.equal(transitions[1].data.previousReason, 'surface-missing');
-  assert.ok(game.video.events.length > clicks);
+  assert.equal(game.video.events.length, clicks, 'a returning surface does not prove that the game is still logged in');
+  await game.sample();
+  game.video.frame();
+  await game.sample();
+  assert.equal(game.video.events.length, clicks, 'fresh frames still require explicit login confirmation');
+  game.click('confirm-resume');
+  await game.clock.advance(400);
+  assert.ok(game.video.events.length > clicks, 'clicks resume only after explicit login confirmation');
+  assert.ok(transitions.length >= 1);
   game.click('stop');
   await game.clock.advance(100);
 });
@@ -368,7 +387,8 @@ test('decoding new frames cannot hide a frozen video presentation', async () => 
   await establishFlow(game, peer);
   const decoderTimer = game.clock.schedule(() => peer.progress(), 1000, true);
   await game.clock.advance(40000);
-  assert.ok(game.recoveries().length > 0, 'decode advances while rVFC/video frame counter stays still');
+  assert.equal(game.health().at(-1).status, 'blocked', 'decode advances while rVFC/video frame counter stays still');
+  assert.equal(game.recoveries().length, 0);
   game.clock.timers.delete(decoderTimer);
 });
 
@@ -385,11 +405,12 @@ test('a canvas redraw loop cannot hide frozen inbound video frames', async () =>
   peer.progress();
   await game.sample();
   await game.clock.advance(40000);
-  assert.ok(game.recoveries().length > 0, 'drawing the same frame does not count as decoded stream progress');
+  assert.equal(game.health().at(-1).status, 'blocked', 'drawing the same frame does not count as decoded stream progress');
+  assert.equal(game.recoveries().length, 0);
   game.clock.timers.delete(redrawTimer);
 });
 
-test('a stopped canvas renderer with advancing decoded frames requests recovery', async () => {
+test('a stopped canvas renderer with advancing decoded frames blocks after same-page repair', async () => {
   const game = createGame({ surface: 'canvas' });
   const peer = new game.window.RTCPeerConnection();
   game.control();
@@ -405,7 +426,8 @@ test('a stopped canvas renderer with advancing decoded frames requests recovery'
   await game.sample();
   const decoderTimer = game.clock.schedule(() => peer.progress(), 1000, true);
   await game.clock.advance(40000);
-  assert.ok(game.recoveries().length > 0, 'new decoded frames with a previously active renderer that stops drawing prove render stall');
+  assert.equal(game.health().at(-1).status, 'blocked', 'new decoded frames with a previously active renderer that stops drawing prove render stall');
+  assert.equal(game.recoveries().length, 0);
   game.clock.timers.delete(decoderTimer);
 });
 
@@ -439,26 +461,28 @@ test('healthy video and inbound RTC progression prevents recovery', async () => 
   game.clock.timers.delete(progressTimer);
 });
 
-test('confirmed stopped frames get a soft recovery and only later request a host reload', async () => {
+test('confirmed stopped frames get a soft recovery and then block without requesting a reload', async () => {
   const game = createGame();
   const peer = new game.window.RTCPeerConnection();
   await establishFlow(game, peer);
   await game.clock.advance(30000);
-  assert.ok(game.video.playCalls >= 1, 'try to resume the media element before reconnecting');
+  assert.ok(game.video.playCalls >= 1, 'try to resume the existing media element');
   assert.equal(game.recoveries().length, 0, 'soft recovery has a grace period');
   await game.clock.advance(5000);
   assert.equal(game.recoveries().length, 0);
   await game.clock.advance(5000);
-  const recovery = game.recoveries().at(-1);
-  assert.ok(recovery, 'persistent confirmed stall requests host recovery');
+  const recovery = game.health().at(-1);
+  assert.equal(game.recoveries().length, 0, 'persistent confirmed stalls preserve the existing cloud session');
   assert.equal(recovery.generation, 'test-generation');
   assert.equal(recovery.appKey, 'jcc');
-  assert.equal(recovery.status, 'recovering');
+  assert.equal(recovery.status, 'blocked');
   assert.ok(recovery.evidence.staleForMs >= 30000);
   assert.ok(recovery.evidence.softRecoveryWaitMs >= 10000);
+  assert.ok(game.importantEvents('stream-recovery-blocked').length > 0);
+  assert.equal(game.reloads.length, 0);
 });
 
-test('frames resuming during soft recovery cancel the pending host reload', async () => {
+test('frames resuming during soft recovery are healthy without requesting a reload', async () => {
   const game = createGame();
   const peer = new game.window.RTCPeerConnection();
   await establishFlow(game, peer);
@@ -514,6 +538,20 @@ test('an intentionally paused video with an established healthy RTC is not reloa
   assert.equal(game.video.playCalls, 0, 'do not undo an intentional pause');
 });
 
+test('a paused presentation does not mask a confirmed failure of the active RTC peer', async () => {
+  const game = createGame({ recording: false });
+  const peer = new game.window.RTCPeerConnection();
+  await establishFlow(game, peer);
+  game.video.paused = true;
+  peer.connectionState = 'failed';
+  peer.iceConnectionState = 'failed';
+  peer.dispatch('connectionstatechange');
+  await game.clock.advance(40000);
+  assert.ok(peer.restartCalls > 0, 'known RTC failure is evaluated independently of the paused presentation');
+  assert.equal(game.video.playCalls, 0, 'an intentional pause is not undone by unrelated repair');
+  assert.equal(game.reloads.length, 0);
+});
+
 test('a static canvas alone cannot prove a freeze', async () => {
   const game = createGame({ surface: 'canvas' });
   game.control();
@@ -552,7 +590,7 @@ test('canvas context loss is observable and restoration cancels recovery', async
   assert.equal(contextRestored.data.lostForMs, 30000);
 });
 
-test('a persistent WebGL context loss requests recovery even without RTC counters', async () => {
+test('a persistent WebGL context loss blocks without replacing the cloud session', async () => {
   const game = createGame({ surface: 'canvas' });
   game.control();
   const context = game.canvas.getContext('webgl');
@@ -561,10 +599,12 @@ test('a persistent WebGL context loss requests recovery even without RTC counter
   context.lost = true;
   game.canvas.dispatch('webglcontextlost');
   await game.clock.advance(40000);
-  assert.ok(game.recoveries().length > 0);
+  assert.equal(game.health().at(-1).status, 'blocked');
+  assert.ok(context.restores > 0);
+  assert.equal(game.recoveries().length, 0);
 });
 
-test('a sustained failed peer gets an ICE restart before asking the host to recover', async () => {
+test('a sustained failed peer gets an ICE restart and blocks without requesting a new session', async () => {
   const game = createGame({ surface: 'canvas' });
   const peer = new game.window.RTCPeerConnection();
   game.control();
@@ -581,7 +621,222 @@ test('a sustained failed peer gets an ICE restart before asking the host to reco
   assert.ok(peer.restartCalls > 0);
   assert.equal(game.recoveries().length, 0);
   await game.clock.advance(10000);
-  assert.ok(game.recoveries().length > 0);
+  assert.equal(game.health().at(-1).status, 'blocked');
+  assert.equal(game.recoveries().length, 0);
+});
+
+test('an earlier presentation stall does not mask a later failure of the active RTC connection', async () => {
+  const game = createGame({ recording: false });
+  const peer = new game.window.RTCPeerConnection();
+  await establishFlow(game, peer);
+  await game.clock.advance(5000);
+  peer.connectionState = 'failed';
+  peer.iceConnectionState = 'failed';
+  peer.dispatch('connectionstatechange');
+  await game.clock.advance(35000);
+  assert.ok(game.video.playCalls > 0, 'presentation repair is attempted');
+  assert.ok(peer.restartCalls > 0, 'the actual failed peer is repaired independently of the earlier presentation failure');
+  assert.equal(game.recoveries().length, 0);
+  assert.equal(game.reloads.length, 0);
+  assert.deepEqual(peer.signalingCalls, [], 'the page owns signaling; the helper does not manufacture SDP or ICE messages');
+});
+
+test('soft repair preserves native signaling behavior and never manufactures SDP', async () => {
+  const game = createGame();
+  const peer = new game.window.RTCPeerConnection();
+  assert.equal(peer.createOffer, game.NativePeerConnection.prototype.createOffer);
+  assert.equal(peer.setLocalDescription, game.NativePeerConnection.prototype.setLocalDescription);
+  assert.equal(peer.setRemoteDescription, game.NativePeerConnection.prototype.setRemoteDescription);
+  assert.equal(peer.addIceCandidate, game.NativePeerConnection.prototype.addIceCandidate);
+  const offer = await peer.createOffer({ iceRestart: false });
+  assert.deepEqual(offer, { type: 'offer', sdp: 'native-test' });
+  peer.signalingCalls = [];
+  await establishFlow(game, peer);
+  peer.connectionState = 'failed';
+  peer.iceConnectionState = 'failed';
+  peer.dispatch('connectionstatechange');
+  await game.clock.advance(45000);
+  assert.ok(peer.restartCalls > 0);
+  assert.deepEqual(peer.signalingCalls, []);
+  assert.equal(game.recoveries().length, 0);
+});
+
+test('standalone and legacy hosted stalls never navigate or reload the session', async () => {
+  for (const standalone of [true, false]) {
+    const game = createGame({ standalone, recording: false });
+    const peer = new game.window.RTCPeerConnection();
+    await establishFlow(game, peer);
+    const originalLocation = game.window.location.href;
+    peer.connectionState = 'failed';
+    peer.iceConnectionState = 'failed';
+    peer.dispatch('connectionstatechange');
+    await game.clock.advance(180000);
+    assert.deepEqual(game.reloads, [], 'preserve the session even when all soft recovery attempts fail');
+    assert.equal(game.window.location.href, originalLocation);
+    assert.equal(game.recoveries().length, 0, 'do not send the legacy host requestRecovery reload command');
+    assert.ok(game.importantEvents('stream-recovery-blocked').length > 0);
+  }
+});
+
+test('failed ICE repair records unavailable or rejected actions and ends blocked', async () => {
+  for (const unavailable of [true, false]) {
+    const game = createGame({ recording: false });
+    const peer = new game.window.RTCPeerConnection();
+    await establishFlow(game, peer);
+    if (unavailable) peer.restartIce = undefined;
+    else peer.restartIce = () => Promise.reject(vm.runInContext("new Error('ICE restart rejected for test')", game.context));
+    peer.connectionState = 'failed';
+    peer.iceConnectionState = 'failed';
+    peer.dispatch('connectionstatechange');
+    await game.clock.advance(40000);
+    const actions = game.importantEvents('stream-recovery-action').filter(({ data }) => data.action === 'rtc.restartIce');
+    if (unavailable) assert.ok(actions.some(({ data }) => data.outcome === 'unavailable'));
+    else assert.ok(actions.some(({ data }) => data.outcome === 'failed' && data.error.message === 'ICE restart rejected for test'));
+    assert.ok(game.importantEvents('stream-recovery-soft').length > 0);
+    assert.ok(game.importantEvents('stream-recovery-blocked').length > 0);
+    assert.equal(game.recoveries().length, 0);
+    assert.equal(game.reloads.length, 0);
+  }
+});
+
+test('soft repair attempts respect a one-minute cooldown and three-attempt rolling budget', async () => {
+  const game = createGame({ recording: false });
+  const peer = new game.window.RTCPeerConnection();
+  await establishFlow(game, peer);
+  peer.connectionState = 'failed';
+  peer.iceConnectionState = 'failed';
+  peer.dispatch('connectionstatechange');
+  await game.clock.advance(30000);
+  assert.equal(peer.restartCalls, 1);
+  game.repair();
+  await game.clock.flush();
+  assert.equal(peer.restartCalls, 1, 'manual repair does not bypass the cooldown');
+  await game.clock.advance(60000);
+  game.repair();
+  await game.clock.flush();
+  assert.equal(peer.restartCalls, 2);
+  await game.clock.advance(60000);
+  game.repair();
+  await game.clock.flush();
+  assert.equal(peer.restartCalls, 3);
+  await game.clock.advance(60000);
+  game.repair();
+  await game.clock.flush();
+  assert.equal(peer.restartCalls, 3, 'three failed repairs do not loop indefinitely');
+  await game.clock.advance(600000);
+  game.repair();
+  await game.clock.flush();
+  assert.ok(peer.restartCalls > 3, 'expired attempts leave the rolling budget');
+  assert.equal(game.reloads.length, 0);
+  assert.equal(game.recoveries().length, 0);
+});
+
+test('manual same-page repair accepts only the current host, game, and navigation generation', async () => {
+  const game = createGame({ recording: false });
+  const peer = new game.window.RTCPeerConnection();
+  await establishFlow(game, peer);
+  peer.connectionState = 'failed';
+  peer.iceConnectionState = 'failed';
+  peer.dispatch('connectionstatechange');
+  game.repair({ source: new FakeEventTarget() });
+  game.repair({ generation: 'previous-generation' });
+  game.repair({ appKey: 'naruto' });
+  await game.clock.flush();
+  assert.equal(peer.restartCalls, 0, 'unrelated messages cannot operate a connection');
+  game.repair();
+  await game.clock.flush();
+  assert.equal(peer.restartCalls, 1);
+  assert.ok(game.video.playCalls > 0);
+  assert.equal(game.recoveries().length, 0);
+  assert.equal(game.reloads.length, 0);
+});
+
+test('manual same-page repair rejects a recovery command bound to another stream session', async () => {
+  const game = createGame({ recording: false });
+  const peer = new game.window.RTCPeerConnection();
+  await establishFlow(game, peer);
+  peer.connectionState = 'failed';
+  peer.iceConnectionState = 'failed';
+  peer.dispatch('connectionstatechange');
+  game.repair({ session: 'old-stream-session' });
+  await game.clock.flush();
+  assert.equal(peer.restartCalls, 0);
+  game.repair();
+  await game.clock.flush();
+  assert.equal(peer.restartCalls, 1);
+});
+
+test('closed stale peers are never restarted when the current peer fails', async () => {
+  const game = createGame({ recording: false });
+  const stalePeer = new game.window.RTCPeerConnection();
+  await establishFlow(game, stalePeer);
+  stalePeer.close();
+  const activePeer = new game.window.RTCPeerConnection();
+  await game.clock.advance(5000);
+  game.video.frame();
+  activePeer.progress();
+  await game.sample();
+  await game.clock.advance(5000);
+  game.video.frame();
+  activePeer.progress();
+  await game.sample();
+  activePeer.connectionState = 'failed';
+  activePeer.iceConnectionState = 'failed';
+  activePeer.dispatch('connectionstatechange');
+  await game.clock.advance(35000);
+  assert.equal(stalePeer.restartCalls, 0);
+  assert.ok(activePeer.restartCalls > 0, 'the current failing connection gets the repair attempt');
+  assert.ok(game.importantRecords().some(({ event, data }) => event === 'stream-recovery-attempt'
+    && data.trigger === 'automatic'));
+});
+
+test('a replaced video source latches automation until fresh frames and user confirmation', async () => {
+  const game = createGame({ recording: false });
+  const peer = new game.window.RTCPeerConnection();
+  await establishFlow(game, peer);
+  game.click('import');
+  game.panel().querySelector('[data-role="loops"]').value = '0';
+  game.click('run');
+  await game.clock.advance(500);
+  const clicks = game.video.events.length;
+  game.video.srcObject = { getVideoTracks: () => [{ readyState: 'live', enabled: true, muted: false }] };
+  game.video.frame();
+  await game.sample();
+  await game.clock.advance(500);
+  assert.equal(game.video.events.length, clicks, 'a replacement stream is not evidence that login survived');
+  assert.equal(game.panel().querySelector('[data-action="confirm-resume"]').hidden, false,
+    'a source replacement exposes the login confirmation latch');
+  game.video.frame();
+  await game.sample();
+  game.click('confirm-resume');
+  await game.clock.advance(200);
+  assert.ok(game.video.events.length > clicks);
+  game.click('stop');
+  await game.clock.advance(100);
+});
+
+test('clicks stay paused after rendering returns until the user confirms login', async () => {
+  const game = createGame();
+  const peer = new game.window.RTCPeerConnection();
+  await establishFlow(game, peer);
+  game.click('import');
+  game.panel().querySelector('[data-role="interval"]').value = '100';
+  game.panel().querySelector('[data-role="loops"]').value = '0';
+  game.click('run');
+  await game.clock.advance(30000);
+  const pausedClicks = game.video.events.length;
+  await game.clock.advance(10000);
+  assert.equal(game.video.events.length, pausedClicks, 'freeze recovery pauses the click job');
+  const progressTimer = game.clock.schedule(() => { game.video.frame(); peer.progress(); }, 1000, true);
+  await game.clock.advance(10000);
+  assert.equal(game.video.events.length, pausedClicks, 'resumed rendering does not establish login');
+  assert.match(game.panel().innerHTML, /确认登录并继续/);
+  game.click('confirm-resume');
+  await game.clock.advance(500);
+  assert.ok(game.video.events.length > pausedClicks);
+  game.click('stop');
+  await game.clock.advance(100);
+  game.clock.timers.delete(progressTimer);
 });
 
 test('a message from another frame cannot install a recovery generation', async () => {
@@ -605,7 +860,7 @@ test('control from a previous navigation cannot install its stale generation', a
   assert.equal(game.health().at(-1).generation, 'test-generation');
 });
 
-test('recovery resumes custom coordinates with only the remaining finite loops', async () => {
+test('saved custom coordinates and remaining finite loops wait for login confirmation', async () => {
   const point = { x: 0.25, y: 0.75, global: false, surfaceRatio: 800 / 450 };
   const game = createGame({ importedPoints: [point] });
   game.click('import');
@@ -613,11 +868,25 @@ test('recovery resumes custom coordinates with only the remaining finite loops',
   game.panel().querySelector('[data-role="loops"]').value = '10';
   game.click('run');
   await game.clock.advance(250);
+  game.window.__streamTest.state.holdAutomation('test-stall');
   game.window.__streamTest.state.prepareRecovery();
   const intent = JSON.parse(game.session.get('cloud-game-click-run-v1'));
   assert.equal(intent.loops, 8);
   assert.deepEqual(intent.points, [point]);
   const resumed = createGame({ sessionMap: game.session });
+  await resumed.clock.advance(2000);
+  assert.equal(resumed.video.events.length, 0, 'a video element alone never confirms login');
+  assert.ok(resumed.session.has('cloud-game-click-run-v1'), 'the pending job remains available for confirmation');
+  resumed.click('run');
+  await resumed.clock.advance(100);
+  resumed.document.dispatch('keydown', { key: 'F8', target: resumed.document.body, preventDefault() {} });
+  await resumed.clock.advance(100);
+  assert.equal(resumed.video.events.length, 0, 'Run and F8 cannot bypass pending login confirmation');
+  await resumed.sample();
+  resumed.video.frame();
+  await resumed.sample();
+  assert.equal(resumed.video.events.length, 0, 'rendered frames are still not permission to click');
+  resumed.click('confirm-resume');
   await resumed.clock.advance(2000);
   const clicks = resumed.video.events.filter(({ type }) => type === 'click');
   assert.equal(clicks.length, 8);
@@ -637,12 +906,15 @@ test('user stop clears run intent and wins against recovery snapshots and pendin
   assert.equal(game.session.has('cloud-game-click-run-v1'), false);
   await game.clock.advance(100);
   const resumeSession = new Map([['cloud-game-click-run-v1', JSON.stringify({ appKey: 'jcc', running: true,
-    interval: 100, loops: 8, points: [{ x: 0.25, y: 0.75, global: false }] })]]);
+    interval: 100, loops: 8, points: [{ x: 0.25, y: 0.75, global: false }] })],
+  ['cloud-game-click-resume-confirmation-v1', JSON.stringify({ appKey: 'jcc', reason: 'stream-stalled', pendingRun: true })]]);
   const resumed = createGame({ sessionMap: resumeSession });
   resumed.click('stop');
   await resumed.clock.advance(2000);
   assert.equal(resumed.video.events.length, 0);
   assert.equal(resumed.session.has('cloud-game-click-run-v1'), false);
+  assert.equal(resumed.session.has('cloud-game-click-resume-confirmation-v1'), false,
+    'Stop clears the saved login-confirmation latch as well as the run intent');
 });
 
 test('hanging RTC stats time out while video monitoring continues without overlapping requests', async () => {
@@ -707,20 +979,20 @@ test('a frame stall is persisted and exportable when routine diagnostic recordin
   await game.clock.advance(40000);
   assert.equal(game.records().length, 0, 'routine logs remain opt-in');
   const soft = game.importantEvents('stream-recovery-soft').at(-1);
-  const request = game.importantEvents('stream-recovery-request').at(-1);
+  const blocked = game.importantEvents('stream-recovery-blocked').at(-1);
   assert.ok(soft, 'the confirmed fault is recorded automatically');
-  assert.ok(request, 'the escalation is recorded automatically');
+  assert.ok(blocked, 'a blocked same-page repair is recorded automatically');
   assert.equal(typeof soft.id, 'string');
   assert.equal(soft.source, 'userscript');
-  assert.equal(soft.scriptVersion, '1.7.1');
+  assert.equal(soft.scriptVersion, '1.8.0');
   assert.equal(typeof soft.session, 'string');
   assert.equal(soft.appKey, 'jcc');
-  assert.equal(soft.data.incidentId, request.data.incidentId, 'soft recovery and escalation share an incident');
+  assert.equal(soft.data.incidentId, blocked.data.incidentId, 'soft recovery and blocked state share an incident');
   assert.ok(game.messages.some(({ data }) => data.type === 'cgca-incident-v1' && data.record.id === soft.id));
   const exported = game.exportLogs();
   assert.equal(exported.version, 2);
   assert.equal(exported.source, 'userscript');
-  assert.equal(exported.scriptVersion, '1.7.1');
+  assert.equal(exported.scriptVersion, '1.8.0');
   assert.deepEqual(exported.importantRecords, game.importantRecords());
   assert.deepEqual(exported.records, []);
 });
@@ -742,7 +1014,7 @@ test('routine log churn cannot evict a recorded recovery incident', async () => 
   assert.ok(reloaded.exportLogs().importantRecords.some(({ id }) => id === fault.id));
 });
 
-test('an asynchronous video.play failure is recorded and does not block recovery escalation', async () => {
+test('an asynchronous video.play failure is recorded before repair blocks without a reload', async () => {
   const game = createGame({ recording: false });
   const peer = new game.window.RTCPeerConnection();
   await establishFlow(game, peer);
@@ -757,8 +1029,9 @@ test('an asynchronous video.play failure is recorded and does not block recovery
     JSON.stringify(entry.data).includes('Autoplay blocked for test'));
   assert.ok(action, 'the rejected play promise retains its actual error message');
   assert.equal(action.data.incidentId, soft.data.incidentId);
-  assert.ok(game.importantEvents('stream-recovery-request').length > 0);
-  assert.ok(game.recoveries().length > 0);
+  assert.ok(game.importantEvents('stream-recovery-blocked').length > 0);
+  assert.equal(game.recoveries().length, 0);
+  assert.equal(game.reloads.length, 0);
   assert.equal(game.window.__streamTest.state.sampling, false);
 });
 
@@ -864,7 +1137,8 @@ test('a video without frame callbacks falls back to playback quality and still d
   game.clock.timers.delete(progressTimer);
   await game.sample();
   await game.clock.advance(40000);
-  assert.ok(game.recoveries().length > 0, 'the fallback counter also recognizes a stopped presentation');
+  assert.equal(game.health().at(-1).status, 'blocked', 'the fallback counter also recognizes a stopped presentation');
+  assert.equal(game.recoveries().length, 0);
 });
 
 test('a foreground grace reset without new frames is not logged as resumed rendering', async () => {
@@ -908,9 +1182,12 @@ test('storage quota failure retains fault evidence in memory for export and host
   const exported = game.exportLogs();
   const soft = exported.importantRecords.find(({ event }) => event === 'stream-recovery-soft');
   assert.ok(soft, 'export falls back to the retained memory ring');
-  assert.ok(exported.importantRecords.some(({ event }) => event === 'stream-recovery-request'));
+  assert.ok(exported.importantRecords.some(({ event }) => event === 'stream-recovery-blocked'));
   assert.ok(game.messages.some(({ data }) => data.type === 'cgca-incident-v1' && data.record.id === soft.id));
-  assert.ok(game.recoveries().length > 0, 'diagnostic persistence failure does not stop recovery');
+  assert.ok(exported.importantRecords.some(({ event }) => event === 'stream-recovery-attempt'),
+    'diagnostic persistence failure does not stop in-page repair');
+  assert.equal(game.recoveries().length, 0, 'storage failure never falls back to a page reload');
+  assert.equal(game.reloads.length, 0);
 });
 
 test('exports redact sensitive fields and URL query or hash values from new and legacy logs', () => {

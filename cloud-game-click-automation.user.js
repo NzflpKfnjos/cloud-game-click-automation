@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         云游戏点击脚本助手
 // @namespace    local.cloud-game-clicker
-// @version      1.7.1
+// @version      1.8.0
 // @description  记录并按顺序重放云游戏画布上的点击位置，重连后恢复运行
 // @match        https://start.qq.com/game/arm-game/*
 // @run-at       document-start
@@ -15,7 +15,7 @@
   const RUN_STATE_KEY = 'cloud-game-click-run-v1';
   const DIAGNOSTIC_KEY = 'cloud-game-click-diagnostics-v1';
   const DIAGNOSTIC_LIMIT = 3000;
-  const SCRIPT_VERSION = '1.7.1';
+  const SCRIPT_VERSION = '1.8.0';
   const IMPORTANT_DIAGNOSTIC_KEY = 'cloud-game-click-incidents-v1';
   const IMPORTANT_DIAGNOSTIC_LIMIT = 200;
   const diagnosticSession = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -142,13 +142,14 @@
   const STREAM_SAMPLE_MS = 5000;
   const STREAM_STALE_MS = 30000;
   const STREAM_SOFT_WAIT_MS = 10000;
-  const STREAM_RETRY_KEY = 'cloud-game-stream-recovery-v1';
+  const RESUME_CONFIRMATION_KEY = 'cloud-game-click-resume-confirmation-v1';
   let navigationGeneration = null;
   try { navigationGeneration = new URL(window.location.href).searchParams.get('_cgca_generation'); } catch (_) {}
   const streamState = {
     generation: null, peers: new Map(), canvases: new WeakMap(), signals: new Map(), nextPeer: 0,
     surface: null, mediaSource: null, videoWatch: null, getSurface: () => null, getAutomationSnapshot: () => null,
-    prepareRecovery: () => {}, softAt: null, softReason: null, suspended: false, sampling: false,
+    prepareRecovery: () => {}, holdAutomation: () => {}, getRecoverySession: () => null, onHealthUpdate: () => {}, activePeers: [],
+    repairAttempts: [], softAt: null, softReason: null, suspended: false, sampling: false,
     status: 'unobserved', reason: null, evidence: {}, lastLogAt: -Infinity, lastLoggedStatus: null, lastSampleAt: null,
     incidentId: null, incidentStartedAt: null, samples: [], capabilities: { rtcHook: false, canvasHooks: [], videoFrameCallback: false },
   };
@@ -401,22 +402,38 @@
     info.reports = ids;
     return rows;
   }
-  function requestStandaloneRecovery() {
-    let attempts = [];
-    try { attempts = JSON.parse(sessionStorage.getItem(STREAM_RETRY_KEY) || '[]'); } catch (_) {}
+  function performSoftRepair(trigger = 'automatic') {
     const now = Date.now();
-    attempts = Array.isArray(attempts) ? attempts.filter((at) => Number.isFinite(at) && now - at < 600000) : [];
-    if (attempts.length >= 3 || (attempts.length && now - attempts[attempts.length - 1] < 60000)) {
-      const reason = attempts.length >= 3 ? 'retry-limit' : 'cooldown';
-      logImportantDiagnostic('stream-recovery-deferred', { incidentId: streamState.incidentId, reason, attempts: attempts.length }, `standalone:${reason}`);
-      return;
+    streamState.repairAttempts = streamState.repairAttempts.filter((at) => now - at < 600000);
+    if (streamState.repairAttempts.length >= 3 || (streamState.repairAttempts.length
+      && now - streamState.repairAttempts.at(-1) < 60000)) {
+      logImportantDiagnostic('stream-recovery-deferred', { incidentId: streamState.incidentId, trigger,
+        reason: streamState.repairAttempts.length >= 3 ? 'retry-limit' : 'cooldown', attempts: streamState.repairAttempts.length },
+      `soft-repair-deferred:${trigger}:${streamState.repairAttempts.length >= 3 ? 'limit' : 'cooldown'}`);
+      return false;
     }
-    try {
-      // 先持久化预算；存储不可用时不自动刷新，防止无限循环。
-      sessionStorage.setItem(STREAM_RETRY_KEY, JSON.stringify([...attempts, now]));
-      logImportantDiagnostic('stream-recovery-reload', { incidentId: streamState.incidentId, attempt: attempts.length + 1, evidence: streamState.evidence });
-      window.location.reload();
-    } catch (error) { logImportantDiagnostic('stream-recovery-deferred', { incidentId: streamState.incidentId, reason: 'storage-or-reload-error', error }, 'standalone-error'); }
+    streamState.repairAttempts.push(now);
+    streamState.holdAutomation(streamState.softReason || streamState.reason || 'manual-repair');
+    logImportantDiagnostic('stream-recovery-attempt', { incidentId: streamState.incidentId, trigger,
+      attempt: streamState.repairAttempts.length, generation: streamState.generation || navigationGeneration });
+    const surface = streamState.getSurface();
+    if (surface?.tagName?.toLowerCase() === 'video' && !surface.paused && !surface.ended) {
+      recoveryAction('video.play', () => surface.play(), typeof surface.play === 'function');
+    }
+    for (const [pc, info] of streamState.activePeers) {
+      const connection = pc.connectionState || pc.iceConnectionState;
+      if (!info.connected || !['failed', 'disconnected'].includes(connection)) continue;
+      recoveryAction('rtc.restartIce', () => pc.restartIce(), typeof pc.restartIce === 'function');
+    }
+    if (surface) {
+      const canvas = streamState.canvases.get(surface);
+      if (canvas?.lost) {
+        let extension;
+        try { extension = canvas.context?.getExtension?.('WEBGL_lose_context'); } catch (_) {}
+        recoveryAction('webgl.restoreContext', () => extension.restoreContext(), typeof extension?.restoreContext === 'function');
+      }
+    }
+    return true;
   }
   async function sampleStreamHealth() {
     if (streamState.sampling || streamState.suspended) return;
@@ -441,6 +458,9 @@
       const isVideo = surface?.tagName?.toLowerCase() === 'video';
       const mediaSource = isVideo ? (surface.srcObject || surface.currentSrc || null) : null;
       if (surface !== streamState.surface || mediaSource !== streamState.mediaSource) {
+        if (streamState.surface && (surface !== streamState.surface || mediaSource !== streamState.mediaSource)) {
+          streamState.holdAutomation(surface ? 'surface-replaced' : 'surface-missing');
+        }
         logImportantDiagnostic('stream-surface-change', { previous: describeSurface(streamState.surface), current: describeSurface(surface),
           mediaSourceChanged: mediaSource !== streamState.mediaSource, viewport: { width: innerWidth, height: innerHeight } });
         streamState.surface = surface;
@@ -476,16 +496,22 @@
         }, { pc: null, at: -Infinity });
         if (latest.pc) peerRows = peerRows.filter((row) => row.pc === latest.pc);
       }
+      streamState.activePeers = peerRows.map((row) => [row.pc, row.info]);
       const failures = [];
       const addFailure = (reason, at, pc = null) => { if (at !== null && now - at >= STREAM_STALE_MS) failures.push({ reason, at, pc }); };
       if (canvas?.lost) addFailure('render-context-lost', canvas.lostAt);
       const tracks = isVideo ? surface.srcObject?.getVideoTracks?.() : null;
       const videoActive = isVideo && !surface.paused && !surface.ended
         && (!tracks?.length || tracks.some((track) => track.readyState === 'live' && track.enabled !== false));
-      if (isVideo && !videoActive) resetStreamGrace();
+      if (isVideo && !videoActive) {
+        if (presented) presented.at = now;
+      }
       if (videoActive && presented?.seen) addFailure('video-presentation-stalled', presented.at);
       for (const row of peerRows) {
-        if (isVideo && (!videoActive || (presented?.seen && now - presented.at < STREAM_STALE_MS))) continue;
+        if (isVideo && !videoActive) {
+          if (row.info.failureAt !== null) addFailure('peer-connection-stalled', row.info.failureAt, row.pc);
+          continue;
+        }
         if (row.info.failureAt !== null) addFailure('peer-connection-stalled', row.info.failureAt, row.pc);
         const frameSignal = row.decoded?.seen ? row.decoded : row.received?.seen ? row.received : null;
         if (frameSignal) addFailure(row.decoded?.seen ? 'video-decode-stalled' : 'video-receive-stalled', frameSignal.at, row.pc);
@@ -525,6 +551,7 @@
         streamState.status = seen ? 'healthy' : 'unobserved';
         streamState.reason = null;
         sendStreamHealth();
+        streamState.onHealthUpdate();
         return;
       }
       if (streamState.softAt === null || streamState.softReason !== failure.reason) {
@@ -536,37 +563,43 @@
         streamState.softAt = now;
         streamState.softReason = failure.reason;
         logImportantDiagnostic('stream-recovery-soft', { incidentId: streamState.incidentId, reason: failure.reason, evidence: streamState.evidence });
-        if (isVideo) {
-          recoveryAction('video.play', () => surface.play(), typeof surface.play === 'function');
-        }
-        if (canvas?.lost) {
-          let extension;
-          try { extension = canvas.context?.getExtension?.('WEBGL_lose_context'); } catch (_) {}
-          recoveryAction('webgl.restoreContext', () => extension.restoreContext(), typeof extension?.restoreContext === 'function');
-        }
-        if (failure.pc && /peer-connection|transport|receive/.test(failure.reason)) {
-          recoveryAction('rtc.restartIce', () => failure.pc.restartIce(), typeof failure.pc.restartIce === 'function');
-        }
+        streamState.holdAutomation(failure.reason);
+        performSoftRepair('automatic');
       }
       streamState.status = 'recovering';
       streamState.reason = failure.reason;
       streamState.evidence.softRecoveryWaitMs = now - streamState.softAt;
-      const request = now - streamState.softAt >= STREAM_SOFT_WAIT_MS;
-      if (request) {
+      const blocked = now - streamState.softAt >= STREAM_SOFT_WAIT_MS;
+      if (blocked) {
         streamState.prepareRecovery();
-        logImportantDiagnostic('stream-recovery-request', { incidentId: streamState.incidentId, reason: failure.reason, evidence: streamState.evidence }, `request:${streamState.incidentId}`);
+        logImportantDiagnostic('stream-recovery-blocked', { incidentId: streamState.incidentId,
+          reason: failure.reason, evidence: streamState.evidence, sessionPreserved: true });
+        logImportantDiagnostic('stream-recovery-request', { incidentId: streamState.incidentId,
+          reason: failure.reason, evidence: streamState.evidence, requestRecovery: false, manualRequired: true },
+        `manual-required:${streamState.incidentId}`);
       }
-      sendStreamHealth(request);
-      if (request && window.parent === window) requestStandaloneRecovery();
+      streamState.status = blocked ? 'blocked' : 'recovering';
+      streamState.reason = failure.reason;
+      streamState.evidence.loginCheckPending = Boolean(streamState.getRecoverySession());
+      streamState.evidence.automation = streamState.getAutomationSnapshot();
+      sendStreamHealth(false);
+      streamState.onHealthUpdate();
     } catch (error) { logImportantDiagnostic('stream-monitor-error', { error }, 'stream-monitor-error'); }
     finally { streamState.sampling = false; }
   }
   window.addEventListener('message', (event) => {
     const data = event.data;
-    if (event.source !== window.parent || data?.type !== 'cgca-stream-control-v1'
+    if (event.source !== window.parent || !['cgca-stream-control-v1', 'cgca-stream-repair-v1'].includes(data?.type)
       || data.appKey !== streamAppKey() || typeof data.generation !== 'string' || !data.generation
-      || (navigationGeneration && navigationGeneration !== data.generation)) return;
+      || (navigationGeneration && navigationGeneration !== data.generation)
+      || (data.type === 'cgca-stream-repair-v1' && data.session !== diagnosticSession)) return;
     streamState.generation = data.generation;
+    if (data.type === 'cgca-stream-repair-v1') {
+      const attempted = performSoftRepair('manual');
+      logImportantDiagnostic('stream-repair-command', { incidentId: streamState.incidentId, accepted: attempted,
+        trigger: 'host-manual', sessionPreserved: true });
+      return;
+    }
     // 每次握手先发送不带刷新请求的消息，随后监测周期再决定是否恢复。
     sendStreamHealth(false);
     // 启动时产生的诊断可能早于父页监听；握手后重发本次会话，父页按 ID 去重。
@@ -644,7 +677,66 @@
     activePoints: [],
     completed: 0,
     interval: 100,
+    recoveryPause: null,
+    resumeWaiters: [],
   };
+  try {
+    const pending = JSON.parse(sessionStorage.getItem(RESUME_CONFIRMATION_KEY) || 'null');
+    if (pending?.appKey === state.appKey) state.recoveryPause = pending;
+  } catch (_) {}
+
+  function persistRecoveryPause() {
+    try {
+      if (state.recoveryPause) sessionStorage.setItem(RESUME_CONFIRMATION_KEY, JSON.stringify({
+        appKey: state.appKey, incidentId: state.recoveryPause.incidentId, reason: state.recoveryPause.reason,
+        at: state.recoveryPause.at, pendingRun: Boolean(state.recoveryPause.pendingRun),
+      }));
+      else sessionStorage.removeItem(RESUME_CONFIRMATION_KEY);
+    } catch (_) {}
+  }
+
+  function setRecoveryPause(reason, incidentId = streamState.incidentId) {
+    const changed = !state.recoveryPause || state.recoveryPause.reason !== reason
+      || state.recoveryPause.incidentId !== incidentId;
+    if (changed) {
+      state.recoveryPause = { reason, incidentId, at: Date.now(), pendingRun: state.running };
+      if (state.running && !state.stopRequested) {
+        saveRunIntent(state.interval, state.loop === 0 ? 0 : Math.max(1, state.loop - state.completed), state.activePoints);
+      }
+      logImportantDiagnostic('automation-paused-for-recovery', { incidentId, reason, running: state.running });
+      persistRecoveryPause();
+      setStatus('连接停滞，自动点击已暂停；请确认游戏状态后继续。');
+      if (typeof updateRunningUI === 'function') updateRunningUI();
+    }
+  }
+
+  function clearRecoveryPause() {
+    state.recoveryPause = null;
+    persistRecoveryPause();
+    state.resumeWaiters.splice(0).forEach((resolve) => resolve());
+    logImportantDiagnostic('automation-resume-confirmed', { incidentId: streamState.incidentId });
+    streamState.onHealthUpdate();
+  }
+
+  function waitForRecoveryConfirmation() {
+    if (!state.recoveryPause || state.stopRequested) return Promise.resolve();
+    return new Promise((resolve) => state.resumeWaiters.push(resolve));
+  }
+
+  function canConfirmRecoveryResume() {
+    if (!state.recoveryPause || document.visibilityState === 'hidden' || navigator.onLine === false) return false;
+    const surface = getSurface();
+    if (!surface) return false;
+    const now = Date.now();
+    if (surface.tagName?.toLowerCase() === 'video') {
+      const frames = streamState.signals.get('presented');
+      const tracks = surface.srcObject?.getVideoTracks?.() || [];
+      return !surface.paused && !surface.ended && frames?.seen && now - frames.at <= 10000
+        && (!tracks.length || tracks.some((track) => track.readyState === 'live' && track.enabled !== false));
+    }
+    const draws = streamState.signals.get('canvas');
+    return Boolean(draws?.seen && now - draws.at <= 10000);
+  }
 
   function loadRunIntent() {
     try {
@@ -695,6 +787,7 @@
         <button class="success" data-action="run">运行</button>
         <button class="danger" data-action="stop">停止</button>
       </div>
+      <div class="cgca-row"><button data-action="confirm-resume" hidden>确认登录并继续</button></div>
       <div class="cgca-fields">
         <label>间隔(ms)<input data-role="interval" type="number" min="30" step="10" value="${APP_CONFIGS[state.appKey].defaultInterval}"></label>
         <label>循环(0=无限)<input data-role="loops" type="number" min="0" step="1" value="0"></label>
@@ -774,6 +867,7 @@
   const recordButton = panel.querySelector('[data-action="record"]');
   const runButton = panel.querySelector('[data-action="run"]');
   const stopButton = panel.querySelector('[data-action="stop"]');
+  const confirmResumeButton = panel.querySelector('[data-action="confirm-resume"]');
   let markerNodes = [];
 
   function updateAppLabel() {
@@ -863,6 +957,10 @@
     intervalEl.disabled = state.running;
     loopsEl.disabled = state.running;
     runButton.textContent = state.running ? '运行中…' : '运行';
+    confirmResumeButton.hidden = !state.recoveryPause;
+    confirmResumeButton.disabled = Boolean(state.recoveryPause) && !canConfirmRecoveryResume();
+    confirmResumeButton.hidden = !state.recoveryPause;
+    confirmResumeButton.disabled = Boolean(state.recoveryPause) && !canConfirmRecoveryResume();
     if (state.running && state.recording) {
       state.recording = false;
       recordButton.textContent = '记录';
@@ -972,6 +1070,11 @@
 
   async function run() {
     logDiagnostic('run-request', { running: state.running, points: state.points.length, interval: intervalEl.value, loops: loopsEl.value });
+    if (state.recoveryPause) {
+      updateRunningUI();
+      setStatus('请先确认游戏登录状态，再继续自动点击。');
+      return;
+    }
     if (state.running || !state.points.length) {
       if (!state.points.length) setStatus('还没有坐标，请先点击“记录”。');
       return;
@@ -991,11 +1094,14 @@
     try {
       while (!state.stopRequested && (state.loop === 0 || completed < state.loop)) {
         for (let index = 0; index < points.length; index += 1) {
+          await waitForRecoveryConfirmation();
           while (!state.stopRequested && !points[index].global && !getSurface(points[index])) {
             recordClickAvailability('surface-missing');
+            setRecoveryPause('surface-missing', streamState.incidentId);
             setStatus('画布暂不可用，等待画面恢复…');
             await waitWhileRunning(250);
           }
+          await waitForRecoveryConfirmation();
           if (state.stopRequested) break;
           setActiveMarker(index);
           logDiagnostic('run-step', { loop: completed + 1, index, total: points.length });
@@ -1006,6 +1112,7 @@
           // 跨轮点击也保持间隔；单点无限循环必须让出主线程以便停止和监测。
           if (!state.stopRequested && (index < points.length - 1 || state.loop === 0 || completed + 1 < state.loop)) await waitWhileRunning(interval);
         }
+        await waitForRecoveryConfirmation();
         completed += 1;
         state.completed = completed;
       }
@@ -1016,7 +1123,8 @@
       clearRunIntent();
       setActiveMarker(-1);
       updateRunningUI();
-      setStatus(wasStopped ? `已停止 · 已完成 ${completed} 轮` : `运行完成 · 共 ${completed} 轮`);
+      setStatus(state.recoveryPause ? '连接停滞，自动点击已暂停；请确认游戏状态后继续。'
+        : wasStopped ? `已停止 · 已完成 ${completed} 轮` : `运行完成 · 共 ${completed} 轮`);
       logDiagnostic('run-finished', { stopped: wasStopped, completed });
     }
   }
@@ -1025,10 +1133,13 @@
     logDiagnostic('stop-request', { running: state.running });
     if (!state.running) {
       clearRunIntent();
+      clearRecoveryPause();
+      updateRunningUI();
       return;
     }
     state.stopRequested = true;
     clearRunIntent();
+    clearRecoveryPause();
     setStatus('正在停止…');
   }
 
@@ -1051,6 +1162,17 @@
       setStatus(state.recording ? '记录中：点击游戏画面添加坐标。' : '记录已结束。');
     } else if (action === 'run') run();
     else if (action === 'stop') stop();
+    else if (action === 'confirm-resume') {
+      if (!canConfirmRecoveryResume()) {
+        setStatus('等待原游戏画面恢复并确认登录状态…');
+        return;
+      }
+      const pendingRun = Boolean(state.recoveryPause?.pendingRun && loadRunIntent());
+      clearRecoveryPause();
+      updateRunningUI();
+      if (pendingRun && !state.running) run();
+      else if (!state.running) setStatus('已确认当前游戏状态。');
+    }
     else if (action === 'clear') { stop(); state.points = []; savePoints(); renderList(); setStatus('坐标已清空。'); }
     else if (action === 'minimize') panel.classList.toggle('cgca-collapsed');
     else if (action === 'toggle-diagnostics') setDiagnosticsEnabled(!diagnosticsEnabled);
@@ -1136,12 +1258,17 @@
     setInterval(syncAppFromUrl, 2000);
 
     streamState.getSurface = getSurface;
+    streamState.getRecoverySession = () => state.recoveryPause;
+    streamState.holdAutomation = (reason) => setRecoveryPause(reason, streamState.incidentId);
+    streamState.onHealthUpdate = () => updateRunningUI();
     streamState.getAutomationSnapshot = () => ({ running: state.running, stopRequested: state.stopRequested,
-      points: state.points.length, loopLimit: state.loop, completed: state.completed, intervalMs: state.interval });
+      points: state.points.length, loopLimit: state.loop, completed: state.completed, intervalMs: state.interval,
+      recoveryPaused: Boolean(state.recoveryPause) });
     streamState.prepareRecovery = () => {
       if (state.running && !state.stopRequested) {
         saveRunIntent(state.interval, state.loop === 0 ? 0 : Math.max(1, state.loop - state.completed), state.activePoints);
       }
+      setRecoveryPause(streamState.reason || 'stream-recovery', streamState.incidentId);
     };
     try {
       if (window.parent !== window) window.parent.postMessage({ type: 'cgca-stream-ready-v1',
@@ -1155,15 +1282,17 @@
       intervalEl.value = String(runIntent.interval);
       loopsEl.value = String(runIntent.loops);
       if (runIntent.points) { state.points = runIntent.points; renderList(); }
-      setStatus('连接恢复后准备继续运行…');
-      setTimeout(async () => {
-        if (!loadRunIntent() || state.running) return;
-        const surfaceReady = await waitForSurface();
-        logDiagnostic('surface-wait-finished', { surfaceReady, runIntent: Boolean(loadRunIntent()) });
-        if (surfaceReady && loadRunIntent()) run();
-      }, 1000);
+      state.recoveryPause ||= { reason: 'page-reload', incidentId: null, at: Date.now(), pendingRun: true };
+      state.recoveryPause.pendingRun = true;
+      persistRecoveryPause();
+      setStatus('任务已保留；请确认原游戏登录状态后继续。');
+      updateRunningUI();
     } else {
       clearRunIntent();
+      if (state.recoveryPause) {
+        setStatus('请确认当前游戏登录状态后继续。');
+        updateRunningUI();
+      }
     }
   }
 

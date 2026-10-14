@@ -77,7 +77,8 @@ class FakeClock {
 }
 
 let pageSequence = 0;
-function createPage({ hidden = false, online = true, storage = new Map(), storageThrows = false, observeLongTasks = false } = {}) {
+function createPage({ hidden = false, online = true, storage = new Map(), storageThrows = false,
+  observeLongTasks = false } = {}) {
   const clock = new FakeClock();
   const document = new FakeEventTarget();
   document.hidden = hidden;
@@ -95,7 +96,7 @@ function createPage({ hidden = false, online = true, storage = new Map(), storag
   frame.contentWindow.postMessage = (data, origin) => frameMessages.push({ data, origin });
   const windowTitle = new FakeEventTarget();
   const heading = new FakeEventTarget();
-  const reconnectButton = new FakeEventTarget();
+  const repairButton = new FakeEventTarget();
   const diagnosticStatus = new FakeEventTarget();
   const diagnosticToggle = new FakeEventTarget();
   const diagnosticExport = new FakeEventTarget();
@@ -112,7 +113,7 @@ function createPage({ hidden = false, online = true, storage = new Map(), storag
   document.selectors.set('#app-select', appSelect);
   document.selectors.set('.window-grid', windowGrid);
   document.selectors.set('h1', heading);
-  document.selectors.set('[data-action="reconnect"]', reconnectButton);
+  document.selectors.set('[data-action="repair"]', repairButton);
   document.selectors.set('[data-role="diagnostic-status"]', diagnosticStatus);
   document.selectors.set('[data-action="toggle-diagnostics"]', diagnosticToggle);
   document.selectors.set('[data-action="export-diagnostics"]', diagnosticExport);
@@ -151,7 +152,7 @@ function createPage({ hidden = false, online = true, storage = new Map(), storag
   });
   vm.runInContext(pageScript, context, { filename: 'index.html' });
   return { clock, document, window, navigator, appSelect, windowGrid, state, frame,
-    windowTitle, heading, reconnectButton, loads, networkRequests, frameMessages,
+    windowTitle, heading, repairButton, loads, networkRequests, frameMessages,
     storage, diagnosticStatus, diagnosticToggle, diagnosticExport, exportedPayloads,
     emitLongTask: (entry) => longTaskObserver?.({ getEntries: () => [entry] }) };
 }
@@ -236,13 +237,13 @@ test('errors, network events, and diagnostic messages never add extra reloads', 
   assert.equal(page.clock.timers.size, 0);
 });
 
-test('manual reconnect reloads immediately without scheduling a countdown', () => {
+test('the host exposes no same-game reopen action', () => {
   const page = createPage();
   page.clock.advance(60000);
-  page.reconnectButton.dispatch('click');
-  page.reconnectButton.dispatch('click');
-  assert.deepEqual(page.loads.map(({ at }) => at), [0, 60000, 60000]);
-  assert.equal(new Set(page.loads.map(reconnectToken)).size, 3);
+  assert.equal(html.includes('data-action="reconnect"'), false);
+  assert.equal(page.document.querySelector('[data-action="reconnect"]'), null);
+  assert.equal(typeof page.window.confirm, 'undefined');
+  assert.equal(page.loads.length, 1);
   assert.equal(page.clock.timers.size, 0);
 });
 
@@ -300,7 +301,7 @@ test('stream control handshake survives userscript readiness after iframe load',
   assert.equal(page.frameMessages.at(-1).origin, 'https://start.qq.com');
 });
 
-test('a confirmed freeze reconnects even when diagnostic recording is disabled', () => {
+test('a confirmed freeze preserves the current iframe session with ordinary recording disabled', () => {
   const page = createPage();
   const originalFrameWindow = page.frame.contentWindow;
   loadAndBindStream(page);
@@ -308,13 +309,13 @@ test('a confirmed freeze reconnects even when diagnostic recording is disabled',
   streamHealth(page, { status: 'suspect', reason: 'video-frame-stalled' });
   assert.equal(page.loads.length, 1);
   frozenStream(page);
-  assert.equal(page.loads.length, 2);
-  assert.equal(page.state.textContent, '正在重新连接...');
+  assert.equal(page.loads.length, 1);
+  assert.equal(page.state.textContent, '连接恢复失败，已保留原会话；可尝试修复连接');
   assert.equal(page.frame.contentWindow, originalFrameWindow, 'reuse the iframe WindowProxy');
   assert.equal(page.clock.timers.size, 0);
 });
 
-test('forged and stale stream health cannot request a reconnect', () => {
+test('forged and stale stream health cannot affect session recovery state', () => {
   const page = createPage();
   loadAndBindStream(page);
   const generation = streamControl(page).generation;
@@ -331,8 +332,14 @@ test('forged and stale stream health cannot request a reconnect', () => {
     { origin: 'https://start.qq.com', source: page.frame.contentWindow, data: { ...request, session: 'other-session' } },
   ]) page.window.dispatch('message', event);
   assert.equal(page.loads.length, 1);
+  assert.equal(page.state.textContent, '画面正常');
+  assert.equal(importantRecords(page).filter((record) => record.event === 'host-recovery-decision').length, 0);
   frozenStream(page);
-  assert.equal(page.loads.length, 2);
+  assert.equal(page.loads.length, 1);
+  assert.equal(importantRecords(page).filter((record) => record.event === 'host-recovery-decision').length, 1);
+  page.appSelect.value = 'naruto';
+  page.appSelect.dispatch('change');
+  assert.equal(page.loads.length, 2, 'only an explicit game switch navigates the iframe');
   frozenStream(page, { generation });
   assert.equal(page.loads.length, 2, 'invalidate health immediately when navigation starts');
   page.frame.dispatch('load');
@@ -346,12 +353,14 @@ test('the first message must establish a session before a recovery request', () 
   page.frame.dispatch('load');
   frozenStream(page);
   assert.equal(page.loads.length, 1);
+  assert.equal(importantRecords(page).filter((record) => record.event === 'host-recovery-decision').length, 0);
   streamHealth(page);
   frozenStream(page);
-  assert.equal(page.loads.length, 2);
+  assert.equal(page.loads.length, 1);
+  assert.equal(importantRecords(page).filter((record) => record.event === 'host-recovery-decision').length, 1);
 });
 
-test('recovery requires both prolonged stall evidence and a soft recovery wait', () => {
+test('all legacy recovery requests preserve the session, regardless of evidence shape', () => {
   const page = createPage();
   loadAndBindStream(page);
   for (const overrides of [
@@ -365,81 +374,134 @@ test('recovery requires both prolonged stall evidence and a soft recovery wait',
   ]) frozenStream(page, overrides);
   assert.equal(page.loads.length, 1);
   frozenStream(page, { evidence: { staleForMs: 30000, softRecoveryWaitMs: 10000 } });
-  assert.equal(page.loads.length, 2);
+  assert.equal(page.loads.length, 1);
+  assert.equal(page.state.textContent, '连接恢复失败，已保留原会话；可尝试修复连接');
 });
 
-test('background and offline freezes defer recovery without spending retry budget', () => {
+test('background and offline freezes never navigate the current iframe', () => {
   const page = createPage({ hidden: true, online: false });
   loadAndBindStream(page);
   frozenStream(page);
-  assert.equal(page.state.textContent, '后台已暂停画面恢复');
+  assert.equal(page.state.textContent, '连接恢复失败，已保留原会话；可尝试修复连接');
   page.document.hidden = false;
   frozenStream(page);
-  assert.equal(page.state.textContent, '网络离线，等待恢复');
+  assert.equal(page.state.textContent, '连接恢复失败，已保留原会话；可尝试修复连接');
   assert.equal(page.loads.length, 1);
   page.navigator.onLine = true;
   frozenStream(page);
-  assert.equal(page.loads.length, 2);
+  assert.equal(page.loads.length, 1);
   for (let attempt = 0; attempt < 2; attempt++) {
     page.clock.advance(60000);
-    loadAndBindStream(page);
     frozenStream(page);
   }
-  assert.equal(page.loads.length, 4, 'all three recovery attempts remain available after defer');
+  assert.equal(page.loads.length, 1);
   assert.equal(page.clock.timers.size, 0);
 });
 
-test('automatic reconnects respect cooldown and rolling attempt limits', () => {
+test('repeated legacy requests over an hour cannot trigger an automatic navigation', () => {
   const page = createPage();
   loadAndBindStream(page);
-  frozenStream(page);
-  loadAndBindStream(page);
-  page.clock.advance(59999);
-  frozenStream(page);
-  assert.equal(page.loads.length, 2);
-  assert.equal(page.state.textContent, '画面仍停滞，等待重连冷却');
-  page.clock.advance(1);
-  frozenStream(page);
-  assert.equal(page.loads.length, 3);
-  loadAndBindStream(page);
-  page.clock.advance(60000);
-  frozenStream(page);
-  assert.equal(page.loads.length, 4);
-  loadAndBindStream(page);
-  page.clock.advance(60000);
-  frozenStream(page);
-  assert.equal(page.loads.length, 4);
-  assert.equal(page.state.textContent, '画面仍停滞，请手动重新连接');
-  page.clock.advance(420000);
-  frozenStream(page);
-  assert.equal(page.loads.length, 5, 'retry allowed after the oldest attempt leaves the 10 minute window');
+  const originalUrl = page.frame.src;
+  const generation = streamControl(page).generation;
+  for (let attempt = 0; attempt < 720; attempt++) {
+    frozenStream(page);
+    page.clock.advance(5000);
+  }
+  assert.equal(page.loads.length, 1);
+  assert.equal(page.frame.src, originalUrl);
+  assert.equal(streamControl(page).generation, generation);
+  assert.equal(page.state.textContent, '连接恢复失败，已保留原会话；可尝试修复连接');
   assert.equal(page.clock.timers.size, 0);
 });
 
-test('manual reconnect and switching games reset recovery budget and session association', () => {
+test('manual repair sends a session-bound command without navigation or confirmation', () => {
   const page = createPage();
-  for (let attempt = 0; attempt < 3; attempt++) {
-    loadAndBindStream(page);
-    frozenStream(page);
-    page.clock.advance(60000);
-  }
   loadAndBindStream(page);
-  frozenStream(page);
-  assert.equal(page.loads.length, 4);
-  page.reconnectButton.dispatch('click');
-  assert.equal(page.loads.length, 5);
+  const generation = streamControl(page).generation;
+  page.repairButton.dispatch('click');
+  const command = page.frameMessages.at(-1);
+  assert.equal(command.data.type, 'cgca-stream-repair-v1');
+  assert.equal(command.data.generation, generation);
+  assert.equal(command.data.appKey, 'jcc');
+  assert.equal(command.data.session, 'stream-session');
+  assert.equal(command.origin, 'https://start.qq.com');
+  assert.equal(page.loads.length, 1);
+  assert.equal(typeof page.window.confirm, 'undefined');
+  assert.equal(page.state.textContent, '正在修复连接，保留原会话...');
+});
+
+test('manual repair waits for the actual iframe session handshake', () => {
+  const page = createPage();
+  page.repairButton.dispatch('click');
+  page.frame.dispatch('load');
+  page.repairButton.dispatch('click');
+  assert.equal(page.frameMessages.some(({ data }) => data.type === 'cgca-stream-repair-v1'), false);
+  assert.equal(page.loads.length, 1);
+});
+
+test('manual repair retains iframe identity and can only resolve after frame progress', () => {
+  const page = createPage();
   loadAndBindStream(page);
-  frozenStream(page);
-  assert.equal(page.loads.length, 6, 'manual reconnect resets the cooldown and retry limit');
-  const oldGeneration = streamControl(page).generation;
-  page.appSelect.value = 'naruto';
-  page.appSelect.dispatch('change');
+  frozenStream(page, { evidence: { staleForMs: 40000, softRecoveryWaitMs: 10000, presentedFrames: 11 } });
+  const originalUrl = page.frame.src;
+  page.repairButton.dispatch('click');
+  assert.equal(page.loads.length, 1);
+  assert.equal(page.frame.src, originalUrl);
+  assert.equal(typeof page.window.confirm, 'undefined');
+  assert.equal(importantRecords(page).filter((record) => record.event === 'host-frame-navigation').length, 1);
+  page.clock.advance(5000);
+  streamHealth(page, { evidence: { presentedFrames: 12 } });
+  const outcome = importantRecords(page).find((record) => record.event === 'host-recovery-outcome');
+  assert.equal(outcome.data.result, 'frames-resumed');
+  assert.equal(outcome.data.previousGeneration, outcome.data.newGeneration);
+  assert.equal(outcome.data.previousSession, outcome.data.newSession);
+  assert.equal(outcome.data.loginState, 'unverified');
+});
+
+test('blocked health preserves the session and manual repair does not navigate', () => {
+  const page = createPage();
   loadAndBindStream(page);
-  frozenStream(page, { appKey: 'jcc', generation: oldGeneration });
-  assert.equal(page.loads.length, 7, 'prior game messages are invalid');
-  frozenStream(page);
-  assert.equal(page.loads.length, 8, 'switching games resets the cooldown');
-  assert.match(new URL(page.frame.src).hash, /^#\/game\/700724\?/);
+  const generation = streamControl(page).generation;
+  streamHealth(page, { status: 'blocked', reason: 'soft-recovery-exhausted' });
+  assert.equal(page.loads.length, 1);
+  assert.equal(page.state.textContent, '连接恢复失败，已保留原会话；可尝试修复连接');
+  const decision = importantRecords(page).find((record) => record.event === 'host-recovery-decision');
+  assert.equal(decision.data.decision, 'preserve-session');
+  assert.equal(decision.data.deferReason, 'manual-required');
+  page.repairButton.dispatch('click');
+  assert.equal(page.loads.length, 1);
+  assert.equal(new URL(page.frame.src).searchParams.get('_cgca_generation'), generation);
+  assert.ok(page.frameMessages.some(({ data }) => data.type === 'cgca-stream-repair-v1'));
+});
+
+test('healthy status without increased stream counters does not claim recovery', () => {
+  const page = createPage();
+  loadAndBindStream(page);
+  frozenStream(page, { evidence: { staleForMs: 40000, softRecoveryWaitMs: 10000,
+    presentedFrames: 21, canvasDraws: 9, peers: [{ peer: 4, framesDecoded: 18, framesReceived: 22 }] } });
+  page.clock.advance(5000);
+  streamHealth(page, { evidence: { presentedFrames: 21, canvasDraws: 9,
+    peers: [{ peer: 4, framesDecoded: 18, framesReceived: 22 }] } });
+  assert.equal(importantRecords(page).some((record) => record.event === 'host-recovery-outcome'), false);
+  assert.equal(page.exportedPayloads.length, 0);
+  page.diagnosticExport.dispatch('click');
+  assert.ok(page.exportedPayloads.at(-1).streams[0].pendingInPageRecovery);
+  assert.equal(page.state.textContent, '画面正常，恢复结果待验证');
+  assert.equal(page.loads.length, 1);
+});
+
+test('same peer frame counters increasing resolves in-page recovery but not login state', () => {
+  const page = createPage();
+  loadAndBindStream(page);
+  frozenStream(page, { evidence: { staleForMs: 40000, softRecoveryWaitMs: 10000,
+    canvasDraws: 10, peers: [{ peer: 4, framesDecoded: 18, framesReceived: 22 }] } });
+  streamHealth(page, { evidence: { canvasDraws: 10,
+    peers: [{ peer: 4, framesDecoded: 18, framesReceived: 23 }] } });
+  const outcome = importantRecords(page).find((record) => record.event === 'host-recovery-outcome');
+  assert.equal(outcome.data.result, 'frames-resumed');
+  assert.equal(outcome.data.loginState, 'unverified');
+  assert.equal(outcome.data.newGeneration, streamControl(page).generation);
+  assert.equal(page.state.textContent, '画面已恢复，登录状态待确认');
 });
 
 function importantRecords(page) {
@@ -463,26 +525,26 @@ test('protected recovery logs include source evidence and iframe identities with
   loadAndBindStream(page);
   const previousGeneration = streamControl(page).generation;
   page.clock.advance(40000);
-  frozenStream(page, { incidentId: 'freeze-request-1' });
+  frozenStream(page, { incidentId: 'freeze-request-1',
+    evidence: { staleForMs: 40000, softRecoveryWaitMs: 10000, presentedFrames: 10 } });
   const decision = importantRecords(page).find((record) => record.event === 'host-recovery-decision');
   assert.equal(decision.source, 'page');
-  assert.equal(decision.scriptVersion, '1.7.1');
+  assert.equal(decision.scriptVersion, '1.8.0');
   assert.equal(decision.data.generation, previousGeneration);
   assert.equal(decision.data.iframeSession, 'stream-session');
-  assert.equal(decision.data.decision, 'reconnect');
+  assert.equal(decision.data.decision, 'preserve-session');
+  assert.equal(decision.data.deferReason, 'manual-required');
   assert.equal(decision.data.sourceIncidentId, 'freeze-request-1');
   assert.equal(decision.data.evidence.staleForMs, 40000);
-  assert.equal(decision.data.attempt, 1);
   assert.equal(page.window.__CGCA_DIAGNOSTICS.read().length, 0);
   page.clock.advance(5000);
-  page.frame.dispatch('load');
-  streamHealth(page, { session: 'stream-session-new' });
+  streamHealth(page, { session: 'stream-session', evidence: { loginCheckPending: true, presentedFrames: 11 } });
   const outcome = importantRecords(page).find((record) => record.event === 'host-recovery-outcome');
   assert.equal(outcome.data.result, 'frames-resumed');
   assert.equal(outcome.data.previousGeneration, previousGeneration);
   assert.equal(outcome.data.previousSession, 'stream-session');
-  assert.equal(outcome.data.newGeneration, streamControl(page).generation);
-  assert.equal(outcome.data.newSession, 'stream-session-new');
+  assert.equal(outcome.data.newGeneration, previousGeneration);
+  assert.equal(outcome.data.newSession, 'stream-session');
   assert.equal(outcome.data.sourceIncidentId, 'freeze-request-1');
   assert.equal(outcome.data.recoveryDurationMs, 5000);
   assert.equal(page.clock.timers.size, 0);
@@ -502,7 +564,7 @@ test('critical records survive routine log flood, refresh and export while ordin
   const exported = reloaded.exportedPayloads.at(-1);
   assert.equal(exported.version, 2);
   assert.equal(exported.source, 'page');
-  assert.equal(exported.scriptVersion, '1.7.1');
+  assert.equal(exported.scriptVersion, '1.8.0');
   assert.equal(exported.recording, false);
   assert.equal(exported.retention.importantRecords, 200);
   assert.equal(exported.retention.importantAlwaysOn, true);
@@ -534,7 +596,8 @@ test('incident ingestion preserves source identity and rejects duplicate, forged
     [{ id: 'wrong-window' }, { source: {} }],
   ]) sendIncident(page, overrides, eventOverrides);
   assert.equal(importantRecords(page).length, 2);
-  page.reconnectButton.dispatch('click');
+  page.appSelect.value = 'naruto';
+  page.appSelect.dispatch('change');
   sendIncident(page, { id: 'previous-navigation', data: record.data });
   assert.equal(importantRecords(page).some((entry) => entry.id === 'previous-navigation'), false);
 });
@@ -549,7 +612,7 @@ test('deferred recovery decision logs are bounded by reason and thirty-second ca
   page.document.hidden = false;
   frozenStream(page);
   const decisions = importantRecords(page).filter((record) => record.event === 'host-recovery-decision');
-  assert.deepEqual(Array.from(decisions, (record) => record.data.deferReason), ['hidden', 'hidden', 'offline']);
+  assert.deepEqual(Array.from(decisions, (record) => record.data.deferReason), ['manual-required', 'manual-required']);
   assert.equal(page.loads.length, 1);
   assert.equal(page.clock.timers.size, 0);
 });
@@ -599,7 +662,7 @@ test('fault logs record iframe errors and severe long tasks without reload and r
   assert.equal(page.clock.timers.size, 0);
 });
 
-test('export identifies pending reconnects when the replacement iframe has not reported healthy frames', () => {
+test('export identifies pending in-page recovery when frames have not resumed', () => {
   const page = createPage();
   loadAndBindStream(page);
   const previousGeneration = streamControl(page).generation;
@@ -608,14 +671,13 @@ test('export identifies pending reconnects when the replacement iframe has not r
   page.clock.advance(5000);
   page.diagnosticExport.dispatch('click');
   const stream = page.exportedPayloads.at(-1).streams[0];
-  assert.equal(stream.loaded, false);
-  assert.equal(stream.iframeSession, null);
-  assert.equal(stream.lastHealthAt, null);
-  assert.equal(stream.pendingRecovery.generation, previousGeneration);
-  assert.equal(stream.pendingRecovery.session, 'stream-session');
-  assert.equal(stream.pendingRecovery.sourceIncidentId, 'pending-freeze-1');
-  assert.equal(stream.pendingRecovery.startedAt, 40000);
-  assert.notEqual(stream.generation, previousGeneration);
+  assert.equal(stream.loaded, true);
+  assert.equal(stream.iframeSession, 'stream-session');
+  assert.equal(stream.pendingInPageRecovery.generation, previousGeneration);
+  assert.equal(stream.pendingInPageRecovery.session, 'stream-session');
+  assert.equal(stream.pendingInPageRecovery.sourceIncidentId, 'pending-freeze-1');
+  assert.equal(stream.pendingInPageRecovery.startedAt, 40000);
+  assert.equal(stream.generation, previousGeneration);
   assert.equal(importantRecords(page).some((record) => record.event === 'host-recovery-outcome'), false);
 });
 
